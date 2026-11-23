@@ -1,0 +1,28 @@
+name: JARVIS v0.98 eighth PAID Backer source lane - five-day schema
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - scripts/v098_eighth_paid_backer_audit.py
+      - .github/workflows/v098-eighth-paid-backersource.yml
+permissions:
+  contents: read
+jobs:
+  backer-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      JARVIS_AUDIT_SOURCE: FinMind_Backer
+      FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read official Backer catalog and actual five-day API fields
+        run: python3 scripts/v098_eighth_paid_backer_audit.py
+      - name: Save Backer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-FinMind_Backer-five-day
+          path: eight_source_5days/FinMind_Backer/
+          retention-days: 60
+          if-no-files-found: warn
