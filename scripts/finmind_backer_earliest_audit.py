@@ -14,9 +14,9 @@ def parse_registry(md):
  out=[]
  for block in re.split(r"(?m)^### ",md)[1:]:
   name=block.splitlines()[0].strip()
-  tm=re.search(r"(?m)^\s*\* Tier:\s*(.+)$",block)
-  rm=re.search(r"(?m)^\s*\* Required:\s*(.+)$",block)
-  cm=re.search(r"(?m)^\s*\* Key columns:\s*(.+)$",block)
+  tm=re.search(r"(?m)^\s*-\s*\*\*Tier:\*\*\s*(.+)$",block)
+  rm=re.search(r"(?m)^\s*-\s*\*\*Required:\*\*\s*(.+)$",block)
+  cm=re.search(r"(?m)^\s*-\s*\*\*Key columns:\*\*\s*(.+)$",block)
   if not tm or not rm:continue
   tier=tm.group(1).strip()
   if tier not in ("Free","Free(w/ data_id)","Backer"):continue
