@@ -1,0 +1,36 @@
+name: JARVIS v0.98 publish TDCC R3B deeper source format to Drive
+on:
+  push:
+    paths:
+      - scripts/v098_publish_tdcc_r3b.py
+      - .github/workflows/v098-publish-tdcc-r3b.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get free-repo native TDCC samples
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p tdcc_r3b_input
+          gh run download 45221828481 --repo danny541690/C1-RAW-DOWNLOADER --name jarvis-v098-tdcc-deep-schema --dir tdcc_r3b_input
+      - name: Save versioned TDCC source evidence and verify Drive SHA
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 scripts/v098_publish_tdcc_r3b.py
+      - name: Preserve receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-v098-tdcc-r3b
+          path: tdcc_r3b_report/
+          retention-days: 90
+          if-no-files-found: warn
