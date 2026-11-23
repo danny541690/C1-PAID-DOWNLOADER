@@ -1,0 +1,37 @@
+name: JARVIS v0.98 publish FinMind and 6-source dataset history rules to Drive
+on:
+  push:
+    paths:
+      - scripts/v098_publish_source_period_rules.py
+      - .github/workflows/v098-publish-source-period-rules.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  write-spec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read earlier Backer API evidence (no API re-download)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p artifact_input/backer_initial artifact_input/backer_repair
+          gh run download 45178606721 --repo ${{ github.repository }} --name finmind-backer-earliest-date-audit --dir artifact_input/backer_initial
+          gh run download 45186591900 --repo ${{ github.repository }} --name finmind-backerschema-repair-qa --dir artifact_input/backer_repair
+      - name: Build evidence-grade source registry and upload with readback checks
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 scripts/v098_publish_source_period_rules.py
+      - name: Preserve registry and upload receipts as CI artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-v098-source-history-specification-20261124
+          path: source_spec_output/
+          retention-days: 90
+          if-no-files-found: warn
