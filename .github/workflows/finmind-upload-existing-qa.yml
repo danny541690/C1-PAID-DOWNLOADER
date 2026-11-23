@@ -1,0 +1,30 @@
+name: JARVIS upload existing Backer QA evidence to Drive (no API re-download)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  upload-existing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download previously completed QA artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 45186591900 --repo ${{ github.repository }} --name finmind-backerschema-repair-qa --dir qa_input
+      - name: Upload reports after Google OAuth refresh is corrected
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 scripts/finmind_upload_existing_qa.py
+      - name: Keep sync receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finmind-drive-upload-receipt
+          path: drive_upload_receipt.json
+          retention-days: 30
+          if-no-files-found: warn
