@@ -1,0 +1,28 @@
+name: FinMind CB and Drive credential diagnostic
+on:
+  push:
+    paths:
+      - ".github/workflows/finmind-followup-cb-drive.yml"
+      - "scripts/finmind_followup_cb_drive.py"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify active CB IDs and diagnose Drive permissions
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 scripts/finmind_followup_cb_drive.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: finmind-cb-drive-diagnostic
+          path: finmind_followup/
+          retention-days: 30
