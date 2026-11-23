@@ -1,0 +1,54 @@
+name: JARVIS v0.98 export verified eight-source R3 Drive rules as complete artifact
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/v098-export-r3-rules.yml
+permissions:
+  contents: read
+  actions: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Obtain immutable R3 Drive upload verification receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p eight_source_r3_complete
+          gh run download 45220835250 --repo ${{ github.repository }} --name jarvis-v098-eight-source-schema-r3 --dir eight_source_r3_complete
+      - name: Export previously verified files, verify original SHA256
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,urllib.parse,urllib.request
+          root=pathlib.Path("eight_source_r3_complete")
+          receipt=json.loads((root/"17_八來源R3遠端回讀履歷_20261124_R3.json").read_text())
+          auth=urllib.parse.urlencode({"client_id":os.environ["GOOGLE_CLIENT_ID"],"client_secret":os.environ["GOOGLE_CLIENT_SECRET"],
+          "refresh_token":os.environ["GOOGLE_REFRESH_TOKEN"],"grant_type":"refresh_token"}).encode()
+          req=urllib.request.Request("https://oauth2.googleapis.com/token",data=auth,headers={"Content-Type":"application/x-www-form-urlencoded"})
+          with urllib.request.urlopen(req,timeout=25) as r:token=json.load(r)["access_token"]
+          count=0
+          for f in receipt["files"]:
+              name=f["name"]
+              if "/" in name or ".." in name:raise RuntimeError("BAD_FILENAME")
+              url="https://www.googleapis.com/drive/v3/files/"+f["file_id"]+"?alt=media"
+              req=urllib.request.Request(url,headers={"Authorization":"Bearer "+token})
+              with urllib.request.urlopen(req,timeout=35) as r:raw=r.read(1000000)
+              if hashlib.sha256(raw).hexdigest()!=f["sha256"]:raise RuntimeError("READBACK_SHA_MISMATCH")
+              (root/name).write_bytes(raw);count+=1
+          print("R3_COMPLETE_DRIVE_EXPORT_PASS",count)
+          PY
+      - name: Preserve complete R3 source schema rule package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-v098-eight-source-r3-complete-verified
+          path: eight_source_r3_complete/
+          retention-days: 90
+          if-no-files-found: warn
