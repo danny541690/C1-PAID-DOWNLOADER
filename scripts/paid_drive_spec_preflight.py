@@ -16,3 +16,7 @@ print("SPEC_CANDIDATES",json.dumps({"count":len(match.get("files",[])),"items":[
 for label,fid in [("SOURCES","1tl-tp35IXSWhDPnrPA_UVuei-E5ZbZ4z"),("REPORTS","1iHKk6KcdIKCVK9TjLbbS8XUiImwtBqlt")]:
  o=get("'"+fid+"' in parents and trashed = false")
  print("CHILD_"+label,json.dumps({"count":len(o.get("files",[])),"next_page":bool(o.get("nextPageToken")),"items":[{"id":v["id"],"name":v["name"],"mime":v["mimeType"]} for v in o.get("files",[])[:80]]},ensure_ascii=False))
+
+for label,fid in [("BRONZE","13DY2S3TuC4KYr8JKiptzUeXG9xZyIzam"),("OPERATIONS","1JIngK7pijr9CyRjamccxNeD5t38WrBN1")]:
+ o=get("'"+fid+"' in parents and trashed = false")
+ print("CHILD_"+label,json.dumps({"count":len(o.get("files",[])),"next_page":bool(o.get("nextPageToken")),"items":[{"id":v["id"],"name":v["name"],"mime":v["mimeType"]} for v in o.get("files",[])[:80]]},ensure_ascii=False))
