@@ -1,0 +1,41 @@
+name: JARVIS v0.98 merge FinMind Free into eight-source Drive rule registry
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - scripts/v098_merge_free_eight_sources.py
+      - .github/workflows/v098-merge-free-eight-sources.yml
+permissions:
+  contents: read
+  actions: read
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download original six-source and Backer specs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p eight_source_inputs/backer_official eight_source_inputs/free
+          gh run download 45214627608 --repo ${{ github.repository }} --name jarvis-v098-source-history-specification-20261124 --dir eight_source_inputs/backer_official
+      - name: Download independent Free run report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 45216009366 --repo danny541690/C1-RAW-DOWNLOADER --name jarvis-v098-finmind-free-history --dir eight_source_inputs/free
+      - name: Upload eight-source merged master and read back each file
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 scripts/v098_merge_free_eight_sources.py
+      - name: Preserve eight-source report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-v098-eight-source-rules-r2
+          path: source_spec_output/
+          retention-days: 90
+          if-no-files-found: warn
