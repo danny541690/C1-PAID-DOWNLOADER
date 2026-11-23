@@ -1,0 +1,23 @@
+name: JARVIS v0.98 FinMind Backer full dataset earliest-date audit
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backer-81-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Query published Free and Backer datasets using Backer token
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 scripts/finmind_backer_earliest_audit.py
+      - name: Upload audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finmind-backer-earliest-date-audit
+          path: finmind_backer_earliest_audit/
+          retention-days: 30
+          if-no-files-found: warn
