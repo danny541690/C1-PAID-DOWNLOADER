@@ -26,7 +26,12 @@ def drive():
   req=urllib.request.Request(url,headers={"Authorization":"Bearer "+token})
   with urllib.request.urlopen(req,timeout=30) as f:obj=json.load(f)
   result.update({"state":"PASS","matching_folder_count":len(obj.get("files",[])),"next_page":bool(obj.get("nextPageToken"))})
- except urllib.error.HTTPError as e:\n  try:\n   safe=json.loads(e.read(4096)).get("error","unknown")\n   if safe not in ("invalid_grant","invalid_client","unauthorized_client","access_denied","invalid_request","invalid_scope"):safe="other"\n  except Exception:safe="unknown"\n  result.update({"state":"HTTP_ERROR","http_status":e.code,"oauth_error_code":safe})
+ except urllib.error.HTTPError as e:
+  try:
+   safe=json.loads(e.read(4096)).get("error","unknown")
+   if safe not in ("invalid_grant","invalid_client","unauthorized_client","access_denied","invalid_request","invalid_scope"):safe="other"
+  except Exception:safe="unknown"
+  result.update({"state":"HTTP_ERROR","http_status":e.code,"oauth_error_code":safe})
  except Exception as e: result.update({"state":"ERROR","error_type":type(e).__name__})
  return result
 def main():
