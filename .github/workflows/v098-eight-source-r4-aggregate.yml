@@ -1,0 +1,50 @@
+name: JARVIS v0.98 R4 merge eight parallel source lanes and Gold443 dependency rules
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - scripts/v098_eight_source_r4_aggregate.py
+      - .github/workflows/v098-eight-source-r4-aggregate.yml
+permissions:
+  contents: read
+  actions: read
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load all eight independent source lane outputs and prior historical master
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p r4_input/existing
+          gh run download 45216685787 --repo ${{ github.repository }} --name jarvis-v098-eight-source-rules-r2 --dir r4_input/existing
+          for source in TWSE TPEx MOPS NDC TDCC TAIFEX FinMind_Free; do
+            mkdir -p "r4_input/$source"
+            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+              if gh run download 45283284088 --repo danny541690/C1-RAW-DOWNLOADER --name "source-$source-five-day" --dir "r4_input/$source"; then break; fi
+              sleep 20
+            done
+            test -s "r4_input/$source/report.json"
+          done
+          mkdir -p r4_input/FinMind_Backer
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            if gh run download 45283451250 --repo ${{ github.repository }} --name source-FinMind_Backer-five-day --dir r4_input/FinMind_Backer; then break; fi
+            sleep 20
+          done
+          test -s r4_input/FinMind_Backer/report.json
+      - name: Crosscheck 8 sources, 5 trading days and 443 candidate Gold dependencies
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 scripts/v098_eight_source_r4_aggregate.py
+      - name: Archive verified R4 source specifications and upload receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-v098-eight-source-r4-schema-history-gold443
+          path: eight_source_r4/
+          retention-days: 90
+          if-no-files-found: warn
