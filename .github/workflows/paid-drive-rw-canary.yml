@@ -1,0 +1,29 @@
+name: JARVIS paid Google Drive OAuth read-write canary
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - scripts/paid_drive_rw_canary.py
+      - .github/workflows/paid-drive-rw-canary.yml
+permissions:
+  contents: read
+jobs:
+  drive-canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate, locate C1_0.98, write, verify and delete test file
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 scripts/paid_drive_rw_canary.py
+      - name: Preserve isolated test result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paid-google-drive-canary-report
+          path: drive_canary_report.json
+          retention-days: 30
+          if-no-files-found: warn
