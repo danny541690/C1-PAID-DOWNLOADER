@@ -196,7 +196,7 @@ def finmind():
 def main():
  report={"schema":"JARVIS_V098_EIGHT_SOURCE_FIVE_DAY_LANE_V1","run_utc":dt.datetime.now(dt.timezone.utc).isoformat(),
   "source":SOURCE,"five_days":DAYS,"Bronze_mutated":False,"Silver_Gold_run":False}
- try:report.update(finmind() if SOURCE=="FinMind_Free" else official())
+ try:report.update(finmind() if SOURCE.startswith("FinMind_") else official())
  except Exception as err:report["lane_error"]={"type":type(err).__name__}
  (ROOT/"report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
  print("JARVIS_SOURCE_LANE_FINAL "+json.dumps({"source":SOURCE,"rows":len(report.get("dataset_registry",[])),
