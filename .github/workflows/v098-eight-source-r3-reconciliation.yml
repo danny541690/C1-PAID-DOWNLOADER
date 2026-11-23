@@ -1,0 +1,47 @@
+name: JARVIS v0.98 R3 reconcile all eight source native schemas and publish Drive rules
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - scripts/v098_eight_source_r3_reconciliation.py
+      - .github/workflows/v098-eight-source-r3-reconciliation.yml
+permissions:
+  contents: read
+  actions: read
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Obtain previous eight-source rule snapshot R2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p r3_input/previous r3_input/free_matched r3_input/backer_matched r3_input/six_official
+          gh run download 45216685787 --repo ${{ github.repository }} --name jarvis-v098-eight-source-rules-r2 --dir r3_input/previous
+      - name: Obtain Free and Backer identical scope API observations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 45219906365 --repo danny541690/C1-RAW-DOWNLOADER --name jarvis-v098-finmind-free-matched --dir r3_input/free_matched
+          gh run download 45219922979 --repo ${{ github.repository }} --name jarvis-v098-finmind-backer-matched --dir r3_input/backer_matched
+      - name: Obtain six-official immutable Bronze native era sampling
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 45220041535 --repo danny541690/C1-RAW-DOWNLOADER --name jarvis-v098-six-official-era-evidence --dir r3_input/six_official
+      - name: Reconcile actual data fields SHA and official era references and publish Drive
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 scripts/v098_eight_source_r3_reconciliation.py
+      - name: Keep complete audit and Drive readback receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-v098-eight-source-schema-r3
+          path: eight_source_r3/
+          retention-days: 90
+          if-no-files-found: warn
