@@ -1,10 +1,6 @@
 name: JARVIS v0.98 FinMind Backer full dataset earliest-date audit
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - "scripts/finmind_backer_earliest_audit.py"
-      - ".github/workflows/finmind-backer-earliest-audit.yml"
 permissions:
   contents: read
 jobs:
