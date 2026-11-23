@@ -1,0 +1,30 @@
+name: JARVIS FinMind Backer repair22 and historical schema QA
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/finmind-backerschema-qa.yml"
+      - "scripts/finmind_backer_repair_qa.py"
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Repair FinMind 22 source requests and sample vintage schemas
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 scripts/finmind_backer_repair_qa.py
+      - name: Upload immutable reports to GitHub Actions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finmind-backerschema-repair-qa
+          path: finmind_repair_qa/
+          retention-days: 30
+          if-no-files-found: warn
