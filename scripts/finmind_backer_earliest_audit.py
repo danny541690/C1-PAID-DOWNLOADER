@@ -76,7 +76,7 @@ def main():
  (out/"report.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
  fields=["dataset","tier","state","rows","first_observed_date","last_observed_date","date_basis","earliest_date_certified","http_status","required","expected_columns","actual_columns","request_params","response_sha256","message"]
  with (out/"dataset_audit.csv").open("w",newline="",encoding="utf-8-sig") as f:
-  w=csv.DictWriter(f,fieldnames=fields);w.writeheader()
+  w=csv.DictWriter(f,fieldnames=fields,extrasaction="ignore");w.writeheader()
   for x in rows:w.writerow({**x,"actual_columns":"|".join(x.get("columns",[])),"request_params":json.dumps(x.get("request_params",{}),ensure_ascii=False)})
  print("FINAL "+json.dumps({k:v for k,v in summary.items() if k!="rows"},ensure_ascii=False),flush=True)
 if __name__=="__main__":main()
