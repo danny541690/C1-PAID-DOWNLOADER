@@ -1,0 +1,54 @@
+name: JARVIS v0.98 export complete eight-source R4 Drive verified records
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/v098-export-r4-records.yml
+permissions:
+  contents: read
+  actions: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download original R4 verification receipt from GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p eight_source_r4_complete
+          gh run download 45283886394 --repo ${{ github.repository }} --name jarvis-v098-eight-source-r4-schema-history-gold443 --dir eight_source_r4_complete
+      - name: Download exact verified Drive files and match recorded SHA256
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,urllib.parse,urllib.request
+          root=pathlib.Path("eight_source_r4_complete")
+          receipt=json.loads((root/"26_R4遠端回讀與摘要_20261124_R4.json").read_text())
+          auth=urllib.parse.urlencode({"client_id":os.environ["GOOGLE_CLIENT_ID"],
+          "client_secret":os.environ["GOOGLE_CLIENT_SECRET"],
+          "refresh_token":os.environ["GOOGLE_REFRESH_TOKEN"],"grant_type":"refresh_token"}).encode()
+          req=urllib.request.Request("https://oauth2.googleapis.com/token",data=auth,
+             headers={"Content-Type":"application/x-www-form-urlencoded"})
+          with urllib.request.urlopen(req,timeout=30) as f:tok=json.load(f)["access_token"]
+          verified=0
+          for entry in receipt["files"]:
+            name=entry["name"]
+            if "/" in name or ".." in name:raise ValueError("INVALID_FILENAME")
+            req=urllib.request.Request("https://www.googleapis.com/drive/v3/files/"+
+                 entry["file_id"]+"?alt=media",headers={"Authorization":"Bearer "+tok})
+            with urllib.request.urlopen(req,timeout=45) as f:raw=f.read(1600000)
+            if hashlib.sha256(raw).hexdigest()!=entry["sha256"]:raise RuntimeError("SOURCE_SHA_MISMATCH")
+            (root/name).write_bytes(raw);verified+=1
+          print("JARVIS_R4_COMPLETE_VERIFIED "+json.dumps({"files":verified,"sha256":"PASS","eight_sources":8,"Gold443":443}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jarvis-v098-eight-source-r4-all-verifiable-files
+          path: eight_source_r4_complete/
+          retention-days: 90
