@@ -1,0 +1,19 @@
+name: FinMind Backer - all market date/grain audit
+on:
+  push:
+    paths:
+      - ".github/workflows/finmind-date-grain-audit.yml"
+      - "scripts/finmind_date_grain_audit.py"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check actual date coverage of all-stock request
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 scripts/finmind_date_grain_audit.py
