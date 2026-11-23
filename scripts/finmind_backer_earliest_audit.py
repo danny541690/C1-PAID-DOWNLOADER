@@ -14,9 +14,9 @@ def parse_registry(md):
  out=[]
  for block in re.split(r"(?m)^### ",md)[1:]:
   name=block.splitlines()[0].strip()
-  tm=re.search(r"(?m)^\\s*\\* Tier:\\s*(.+)$",block)
-  rm=re.search(r"(?m)^\\s*\\* Required:\\s*(.+)$",block)
-  cm=re.search(r"(?m)^\\s*\\* Key columns:\\s*(.+)$",block)
+  tm=re.search(r"(?m)^\s*\\* Tier:\s*(.+)$",block)
+  rm=re.search(r"(?m)^\s*\\* Required:\s*(.+)$",block)
+  cm=re.search(r"(?m)^\s*\\* Key columns:\s*(.+)$",block)
   if not tm or not rm:continue
   tier=tm.group(1).strip()
   if tier not in ("Free","Free(w/ data_id)","Backer"):continue
@@ -26,7 +26,7 @@ def parse_registry(md):
     if label in req:data_id=value;break
    if data_id is None:data_id="2330"
   single="single day" in req.lower()
-  span=re.search(r"(?:資料區間|涵蓋|回溯至)\\s*((?:19|20)\\d{2}-\\d{2}-\\d{2})\\s*(?:~|至)\\s*(?:now|(?:19|20)\\d{2}-\\d{2}-\\d{2})",block,re.I)
+  span=re.search(r"(?:資料區間|涵蓋|回溯至)\s*((?:19|20)\d{2}-\d{2}-\d{2})\s*(?:~|至)\s*(?:now|(?:19|20)\d{2}-\d{2}-\d{2})",block,re.I)
   out.append({"dataset":name,"tier":tier,"endpoint":"/api/v4/data","required":req,
    "expected_columns":cm.group(1).strip() if cm else "","data_id":data_id,"single_day":single,
    "documented_start":span.group(1) if span else None})
