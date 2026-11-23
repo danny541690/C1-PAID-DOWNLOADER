@@ -12,3 +12,7 @@ files=data.get("files",[])
 print("ROOT_CHILDREN",json.dumps({"count":len(files),"next_page":bool(data.get("nextPageToken")),"items":[{"name":x["name"],"id":x["id"],"mime":x["mimeType"]} for x in files[:100]]},ensure_ascii=False))
 match=get("name contains '規格' and trashed = false")
 print("SPEC_CANDIDATES",json.dumps({"count":len(match.get("files",[])),"items":[{"name":x["name"],"id":x["id"],"mime":x["mimeType"],"parents":x.get("parents")} for x in match.get("files",[])[:50]]},ensure_ascii=False))
+
+for label,fid in [("SOURCES","1tl-tp35IXSWhDPnrPA_UVuei-E5ZbZ4z"),("REPORTS","1iHKk6KcdIKCVK9TjLbbS8XUiImwtBqlt")]:
+ o=get("'"+fid+"' in parents and trashed = false")
+ print("CHILD_"+label,json.dumps({"count":len(o.get("files",[])),"next_page":bool(o.get("nextPageToken")),"items":[{"id":v["id"],"name":v["name"],"mime":v["mimeType"]} for v in o.get("files",[])[:80]]},ensure_ascii=False))
