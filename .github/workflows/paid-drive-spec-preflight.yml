@@ -1,0 +1,21 @@
+name: JARVIS v0.98 source specifications folder preflight
+on:
+  push:
+    paths:
+      - scripts/paid_drive_spec_preflight.py
+      - .github/workflows/paid-drive-spec-preflight.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect C1_0.98 folder and specification subfolders
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 scripts/paid_drive_spec_preflight.py
