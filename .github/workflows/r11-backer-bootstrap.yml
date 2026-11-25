@@ -57,7 +57,7 @@ jobs:
           FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
         run: python3 -m scripts.r11_backer.live_preflight
   remote-seed:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-live-pilot]')
     permissions:
       contents: write
     runs-on: ubuntu-latest
