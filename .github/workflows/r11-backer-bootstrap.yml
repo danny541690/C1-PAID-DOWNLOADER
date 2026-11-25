@@ -409,6 +409,47 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.tpex_history --verify-only
+  market-lifetime-ledger:
+    name: Reconcile official listing periods and source-specific fallback
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-lifetime-ledger]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check official listing boundaries and stage evidence in private Drive
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.market_lifetimes
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-market-lifetimes-${{ github.run_attempt }}
+          path: r11-market-lifetimes.json
+          if-no-files-found: error
+          retention-days: 30
+  market-lifetime-readback:
+    name: Verify private listing periods and fallback from Drive
+    needs: [market-lifetime-ledger, synthetic-checks]
+    if: needs.market-lifetime-ledger.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify original evidence digests and reproduce official fallback
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.market_lifetimes --verify-only
   manifest-preview:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
     runs-on: ubuntu-latest
@@ -634,6 +675,8 @@ jobs:
       - history-followup
       - tpex-market-history
       - tpex-market-readback
+      - market-lifetime-ledger
+      - market-lifetime-readback
       - manifest-preview
       - manifest-readback
       - integration-b00

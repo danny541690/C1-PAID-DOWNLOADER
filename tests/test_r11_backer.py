@@ -625,3 +625,39 @@ class TPExHistoricalEvidenceTests(unittest.TestCase):
         self.assertEqual(termination_rows(json.dumps(termination), 2024)[0]["end"], "2024-01-25")
         with self.assertRaises(ValueError):
             termination_rows(json.dumps(termination), 2023)
+
+    def test_market_lifetimes_require_dated_issuer_identity_and_exclusive_intervals(self):
+        from scripts.r11_backer.market_lifetimes import Event, identity_intervals, nonoverlapping
+
+        begin, switch = date(1990, 6, 25), date(2000, 5, 31)
+        start = Event("TPEx", "1234", "甲公司", begin, "start#1")
+        end = Event("TPEx", "1234", "甲公司", switch, "end#1")
+        other_issuer = Event("TPEx", "4321", "甲公司", begin, "start#2")
+        second_exit = Event("TPEx", "4321", "乙公司", switch, "end#2")
+        active = {"market": "TWSE", "code": "1234", "issuer": "甲公司", "start": str(switch),
+                  "as_of": "2026-11-26", "source": "active#1"}
+        intervals, held = identity_intervals([start, other_issuer], [end, second_exit], [active])
+        self.assertEqual(len(intervals), 2)
+        self.assertEqual(intervals[0]["end_exclusive"], intervals[1]["start"])
+        self.assertEqual(held[0]["reason"], "HOLD_UNPROVEN_HISTORICAL_START_OR_IDENTITY")
+        accepted, collisions = nonoverlapping([intervals[0], intervals[1] | {"start": "2000-05-30"}])
+        self.assertEqual(accepted, [])
+        self.assertEqual(len(collisions), 2)
+
+    def test_official_fallback_reuses_original_row_without_reclassifying_backer_gap(self):
+        from scripts.r11_backer.market_lifetimes import fallback_receipts
+        from scripts.r11_backer.test_archive import json_bytes
+
+        first = ["1234", "10.5", "5,000", "2"]
+        zero_volume = ["5678", "20.5", "0", "0"]
+        document = {"stat": "ok", "date": "20101124", "tables": [
+            {"fields": ["代號", "收盤 ", "成交股數", "成交筆數"], "data": [first, zero_volume]},
+        ]}
+        raw = json_bytes(document)
+        gaps = [{"code": code, "window_status": "HOLD_PROVIDER_WINDOW_EMPTY"} for code in ("5678", "1234", "1234")]
+        receipts = fallback_receipts(raw, gaps)
+        self.assertEqual(receipts, fallback_receipts(raw, reversed(gaps)))
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]["source_row_sha256"], hashlib.sha256(json_bytes(first)).hexdigest())
+        self.assertEqual(receipts[0]["original_sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(receipts[0]["backer_status"], "HOLD_SOURCE_GAP")
