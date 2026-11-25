@@ -3,10 +3,6 @@ on:
   push:
     branches:
       - codex/r11-1-backer-preflight
-    paths:
-      - scripts/r11_backer/**
-      - tests/test_r11_backer.py
-      - .github/workflows/r11-backer-bootstrap.yml
   pull_request:
     paths:
       - scripts/r11_backer/**
@@ -41,7 +37,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   live-read-only-preflight:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-live-pilot]')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     outputs:
@@ -160,7 +156,7 @@ jobs:
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: bash scripts/r11_backer/recovery_pilot.sh
   pilot-verdict:
-    if: always() && github.event_name == 'push'
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-live-pilot]')
     needs: [synthetic-checks, public-catalog, live-read-only-preflight, remote-claim, drive-round-trip]
     runs-on: ubuntu-latest
     timeout-minutes: 2
