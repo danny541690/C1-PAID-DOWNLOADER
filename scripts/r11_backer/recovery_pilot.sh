@@ -5,7 +5,7 @@ branch="codex/r11-cas-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 api="repos/$GITHUB_REPOSITORY/contents/.jarvis-test/r11-synthetic.json"
 stage=$(gh api "$api?ref=$branch")
 old_sha=$(jq -er '.sha' <<< "$stage")
-state=$(jq -er '.content | @base64d | fromjson' <<< "$stage")
+state=$(jq -er '.content' <<< "$stage" | base64 -d)
 jq -e '.remaining == 0 and (.owner == "alpha" or .owner == "beta" or .owner == "gamma") and (has("receipt") | not)' <<< "$state" >/dev/null
 
 store() {
@@ -37,5 +37,5 @@ require_stale_rejection "$takeover_sha" "$committed"
 
 result=$(gh api "$api?ref=$branch")
 test "$(jq -er '.sha' <<< "$result")" = "$receipt_sha"
-jq -e '.content | @base64d | fromjson | .remaining == 0 and .generation == 2 and .owner == "recovery" and .receipt == "synthetic_drive_readback_verified"' <<< "$result" >/dev/null
+jq -er '.content' <<< "$result" | base64 -d | jq -e '.remaining == 0 and .generation == 2 and .owner == "recovery" and .receipt == "synthetic_drive_readback_verified"' >/dev/null
 echo 'existing_drive_archive_recovered_once=PASS'
