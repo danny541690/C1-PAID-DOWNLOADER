@@ -423,3 +423,65 @@ class ManifestReadinessTests(unittest.TestCase):
         self.assertEqual(sum(row["state"] == "SAMPLE_ONLY" for row in rows), 63)
         self.assertEqual(sum(row["state"] == "HOLD_CONTRACT" for row in rows), 7)
         self.assertTrue(all(row["state"] != "PRODUCTION_APPROVED" for row in rows))
+
+
+class ReleaseRemediationTests(unittest.TestCase):
+    def test_native_futures_identity_replaces_label_and_rejects_duplicates(self):
+        from scripts.r11_backer.native_contracts import native_result
+        from scripts.r11_backer.release_probes import Contract, Sample, Task
+
+        task = Task("TaiwanFuturesInstitutionalInvestors", "2026-11-24", "2026-11-24", "TX")
+        doc = Contract("Backer", "", "", ("name", "date", "institutional_investors", "long_deal_volume"))
+        row = {"futures_id": "TX", "institutional_investors": "sample", "date": task.start, "long_deal_volume": 1}
+        self.assertEqual(native_result(task, doc, Sample("FIELD_DIFFERENCES", rows=(row,))), "PASS_NATIVE_SAMPLE")
+        self.assertEqual(native_result(task, doc, Sample("FIELD_DIFFERENCES", rows=(row, row))), "HOLD_DUPLICATE_KEY")
+        self.assertEqual(native_result(task, doc, Sample("FIELD_DIFFERENCES", rows=(row | {"futures_id": "MTX"},))),
+                         "HOLD_ENTITY_MISMATCH")
+
+    def test_bond_investor_net_must_match_native_categories(self):
+        from scripts.r11_backer.native_contracts import INVESTORS, bond_investor_balance
+
+        row = {f"{owner}_{action}": value for owner in INVESTORS
+               for action, value in (("Buy", 9), ("Sell", 6), ("Overbuy", 3))}
+        self.assertTrue(bond_investor_balance(row | {"Total_Overbuy": 9}))
+        self.assertFalse(bond_investor_balance(row | {"Total_Overbuy": 6}))
+        self.assertFalse(bond_investor_balance(row | {"Total_Overbuy": 9, "Dealer_self_Sell": 7}))
+
+    def test_start_only_replay_keeps_raw_positions_for_later_dates(self):
+        from scripts.r11_backer.release_probes import Sample
+        from scripts.r11_backer.release_remediation import PRICE_LIMIT_TASKS, suffix_index
+
+        prior, replay = PRICE_LIMIT_TASKS
+        closed = date(2026, 11, 24)
+        rows = tuple({"stock_id": "2330", "date": day, "reference_price": 10, "limit_up": 11, "limit_down": 9}
+                     for day in ("2000-01-04", "2026-11-24", "2026-11-27"))
+        samples = {prior: Sample("VALID_SAMPLE", rows=rows), replay: Sample("VALID_SAMPLE", rows=rows[1:])}
+        report, index = suffix_index(PRICE_LIMIT_TASKS, samples, closed, closed)
+        self.assertEqual(report["status"], "PASS_START_ONLY_SNAPSHOT_SAMPLE")
+        self.assertEqual(index["months"], {"2000-01": [0], "2026-11": [1]})
+        self.assertEqual(index["after_verified_close"], [2])
+        samples[replay] = Sample("VALID_SAMPLE", rows=rows[1:2])
+        self.assertEqual(suffix_index(PRICE_LIMIT_TASKS, samples, closed, closed)[0]["status"],
+                         "HOLD_START_ONLY_SUFFIX_MISMATCH")
+
+    def test_official_close_rejects_wrong_day_and_reconciles_original_positions(self):
+        from decimal import Decimal
+        from scripts.r11_backer.exchange_scope import parse_official_close, reconcile_close
+        from scripts.r11_backer.release_probes import Sample
+
+        day = date(2026, 11, 24)
+        table = {"date": "20261124", "stat": "ok", "tables": [
+            {"fields": ["代號", "收盤 "], "data": [["1234", "1,085.20"], ["061234", "0.50"]]},
+        ]}
+        official = {"TPEx": parse_official_close(table, day, "TPEx"), "TWSE": {"2330": Decimal("90")}}
+        with self.assertRaises(ValueError):
+            parse_official_close(table, date(2026, 11, 23), "TPEx")
+        raw = ({"stock_id": "061234", "close": 0.5}, {"stock_id": "1234", "close": 1085.2},
+               {"stock_id": "2330", "close": 90})
+        result, positions = reconcile_close(Sample("VALID_SAMPLE", rows=raw), official)
+        self.assertEqual(result["status"], "PASS_DATED_CLOSE_SAMPLE")
+        self.assertEqual(result["rows_outside_dated_reference"], 1)
+        self.assertEqual(positions, [1, 2])
+        failed, _ = reconcile_close(Sample("VALID_SAMPLE", rows=raw[:2]), official)
+        self.assertEqual(failed["status"], "HOLD_DATED_CLOSE_RECONCILIATION")
+        self.assertEqual(failed["markets"]["TWSE"]["missing"], 1)

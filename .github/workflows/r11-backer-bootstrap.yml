@@ -252,6 +252,29 @@ jobs:
           path: r11-contract-closeout.json
           if-no-files-found: error
           retention-days: 30
+  release-remediation:
+    name: Verify targeted Backer release improvements
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-release-remediation]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reconcile native fields, dated official closes, bounded archives, and Drive capacity
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_remediation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-release-remediation-${{ github.run_attempt }}
+          path: r11-release-remediation.json
+          if-no-files-found: error
+          retention-days: 30
   manifest-preview:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
     runs-on: ubuntu-latest
