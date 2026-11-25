@@ -1,0 +1,358 @@
+{
+  "CnnFearGreedIndex": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "CrudeOilPrices": {
+    "run": 45623673196,
+    "status": "VALID_SAMPLE"
+  },
+  "EuropeStockInfo": {
+    "run": 45597304811,
+    "status": "HOLD_SCOPE_REVIEW"
+  },
+  "EuropeStockPrice": {
+    "run": 45597304811,
+    "status": "HOLD_SCOPE_REVIEW"
+  },
+  "GoldPrice": {
+    "run": 45626725236,
+    "status": "HOLD_CONTRACT"
+  },
+  "GovernmentBondsYield": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "InterestRate": {
+    "run": 45623673196,
+    "status": "VALID_SAMPLE"
+  },
+  "JapanStockInfo": {
+    "run": 45597304811,
+    "status": "HOLD_SCOPE_REVIEW"
+  },
+  "JapanStockPrice": {
+    "run": 45597304811,
+    "status": "HOLD_SCOPE_REVIEW"
+  },
+  "TaiwanAssetSwapFixedIncomeDaily": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanAssetSwapOptionDaily": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanBusinessIndicator": {
+    "run": 45623673196,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanDailyShortSaleBalances": {
+    "run": 45626725236,
+    "status": "HOLD_CONTRACT"
+  },
+  "TaiwanExchangeRate": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanFutOptDailyInfo": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanFuturesDaily": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanFuturesDealerTradingVolumeDaily": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanFuturesFinalSettlementPrice": {
+    "run": 45623673196,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanFuturesInstitutionalInvestors": {
+    "run": 45626725236,
+    "status": "HOLD_CONTRACT"
+  },
+  "TaiwanFuturesInstitutionalInvestorsAfterHours": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanFuturesOpenInterestLargeTraders": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanFuturesSpreadTrading": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanFuturesTick": {
+    "run": 45597304811,
+    "status": "EXCLUDED_BY_SCOPE"
+  },
+  "TaiwanOptionDaily": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanOptionDealerTradingVolumeDaily": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanOptionFinalSettlementPrice": {
+    "run": 45623673196,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanOptionInstitutionalInvestors": {
+    "run": 45626725236,
+    "status": "HOLD_CONTRACT"
+  },
+  "TaiwanOptionInstitutionalInvestorsAfterHours": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanOptionOpenInterestLargeTraders": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanOptionTick": {
+    "run": 45597304811,
+    "status": "EXCLUDED_BY_SCOPE"
+  },
+  "TaiwanOptionVix": {
+    "run": 45626725236,
+    "status": "EXCLUDED_INTRADAY"
+  },
+  "TaiwanSecuritiesTraderInfo": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStock10Year": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockActiveETFInfo": {
+    "run": 45597304811,
+    "status": "HOLD_SCOPE_REVIEW"
+  },
+  "TaiwanStockAfterHoursFixedPriceTrading": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockBalanceSheet": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockCapitalReductionReferencePrice": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockCashFlowsStatement": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockConvertibleBondDaily": {
+    "run": 45626725236,
+    "status": "HOLD_CONTRACT"
+  },
+  "TaiwanStockConvertibleBondDailyOverview": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockConvertibleBondInfo": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockConvertibleBondInstitutionalInvestors": {
+    "run": 45626725236,
+    "status": "HOLD_CONTRACT"
+  },
+  "TaiwanStockConvertibleBondMonthlyAnalysis": {
+    "run": 45623673196,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockConvertibleBondPutProvision": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockDayTrading": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockDayTradingBorrowingFeeRate": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockDayTradingSuspension": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockDelisting": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockDispositionSecuritiesPeriod": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockDividend": {
+    "run": 45623673196,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockDividendResult": {
+    "run": 45623673196,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockEvery5SecondsIndex": {
+    "run": 45597304811,
+    "status": "EXCLUDED_BY_SCOPE"
+  },
+  "TaiwanStockFinancialStatements": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockHoldingSharesPer": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockIndustryChain": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockInfo": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockInfoWithWarrant": {
+    "run": 45597304811,
+    "status": "HOLD_SCOPE_REVIEW"
+  },
+  "TaiwanStockInstitutionalInvestorsBuySell": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockInstitutionalInvestorsBuySellWide": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockMarginPurchaseShortSale": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockMarginShortSaleSuspension": {
+    "run": 45623673196,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockMarketValue": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockMarketValueWeight": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockMonthPrice": {
+    "run": 45623673196,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockMonthRevenue": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockNews": {
+    "run": 45597304811,
+    "status": "HOLD_SCOPE_REVIEW"
+  },
+  "TaiwanStockPER": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockParValueChange": {
+    "run": 45623673196,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockPrice": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockPriceAdj": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockPriceLimit": {
+    "run": 45626725236,
+    "status": "HOLD_CONTRACT"
+  },
+  "TaiwanStockPriceTick": {
+    "run": 45597304811,
+    "status": "EXCLUDED_BY_SCOPE"
+  },
+  "TaiwanStockSecuritiesLending": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockShareholding": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockSplitPrice": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockStatisticsOfOrderBookAndTrade": {
+    "run": 45597304811,
+    "status": "HOLD_SCOPE_REVIEW"
+  },
+  "TaiwanStockSuspended": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockTotalInstitutionalInvestors": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockTotalMarginPurchaseShortSale": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockTotalReturnIndex": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockTradingDate": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanStockWeekPrice": {
+    "run": 45623673196,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanTotalExchangeMarginMaintenance": {
+    "run": 45597304811,
+    "status": "VALID_SAMPLE"
+  },
+  "TaiwanVariousIndicators5Seconds": {
+    "run": 45597304811,
+    "status": "EXCLUDED_BY_SCOPE"
+  },
+  "UKStockInfo": {
+    "run": 45597304811,
+    "status": "HOLD_SCOPE_REVIEW"
+  },
+  "UKStockPrice": {
+    "run": 45597304811,
+    "status": "HOLD_SCOPE_REVIEW"
+  },
+  "USStockInfo": {
+    "run": 45597304811,
+    "status": "HOLD_SCOPE_REVIEW"
+  },
+  "USStockPrice": {
+    "run": 45597304811,
+    "status": "HOLD_SCOPE_REVIEW"
+  },
+  "USStockPriceMinute": {
+    "run": 45597304811,
+    "status": "EXCLUDED_BY_SCOPE"
+  }
+}

@@ -391,3 +391,35 @@ class ReleaseSweepTests(unittest.TestCase):
         check = lambda rows: inspect_dates(task, Sample("VALID_SAMPLE", rows=rows), date(2026, 11, 25))
         self.assertEqual(check((first, second)), "VALID_SAMPLE")
         self.assertEqual(check((first, first)), "HOLD_MULTIPLE_RECORDS_PER_SOURCE_DAY")
+
+
+class ManifestReadinessTests(unittest.TestCase):
+    def test_manifest_requires_every_release_input(self):
+        from scripts.r11_backer.manifest_pilot import fixture_approvals, manifest_windows
+
+        candidate = fixture_approvals("1990-01-01")[0]
+        candidate["evidence"].pop("coverage_bounds")
+        with self.assertRaisesRegex(ValueError, "missing release evidence"):
+            manifest_windows([candidate])
+
+    def test_manifest_clips_to_effective_identity_and_is_newest_first(self):
+        from scripts.r11_backer.manifest_pilot import fixture_approvals, manifest_windows
+
+        candidate = fixture_approvals("1990-01-01")[0] | {
+            "listing_start": "1992-11-13", "listing_end": "1993-01-15",
+        }
+        result = manifest_windows([candidate])
+        self.assertEqual(
+            [(x.start.isoformat(), x.end.isoformat()) for x in result],
+            [("1993-01-01", "1993-01-15"), ("1992-12-01", "1992-12-31"),
+             ("1992-11-13", "1992-11-30")],
+        )
+
+    def test_readiness_distinguishes_live_sample_from_release_approval(self):
+        from scripts.r11_backer.manifest_pilot import sample_data
+
+        rows = sample_data()
+        self.assertEqual(len(rows), 89)
+        self.assertEqual(sum(row["state"] == "SAMPLE_ONLY" for row in rows), 63)
+        self.assertEqual(sum(row["state"] == "HOLD_CONTRACT" for row in rows), 7)
+        self.assertTrue(all(row["state"] != "PRODUCTION_APPROVED" for row in rows))

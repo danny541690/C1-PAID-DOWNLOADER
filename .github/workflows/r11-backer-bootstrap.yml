@@ -252,6 +252,31 @@ jobs:
           path: r11-contract-closeout.json
           if-no-files-found: error
           retention-days: 30
+  manifest-preview:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replay candidate evidence and exercise newest-first chronological expansion
+        run: python3 -m scripts.r11_backer.manifest_pilot
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r11-manifest-readiness-${{ github.run_attempt }}
+          path: r11-manifest-readiness.json
+          if-no-files-found: error
+          retention-days: 30
+  manifest-readback:
+    needs: manifest-preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: r11-manifest-readiness-${{ github.run_attempt }}
+      - name: Independently regenerate and compare the frozen test manifest and checks
+        run: python3 -m scripts.r11_backer.manifest_pilot --verify-only
   paid-archive-readback:
     needs: release-sweep
     if: needs.release-sweep.outputs.archive == 'STAGED_PRIVATE_SAMPLES'
