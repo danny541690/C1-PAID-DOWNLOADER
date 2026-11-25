@@ -214,5 +214,29 @@
     "status": "VALID_SAMPLE",
     "run_id": 45595104533,
     "job_id": 139139108651
+  },
+  "963f64e08e92c12a488a1ad25055ef1efa502b1a7e389487f938915bed26541e": {
+    "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+    "status": "EMPTY_WINDOW",
+    "run_id": 45595303130,
+    "job_id": 139139755541
+  },
+  "5de7bd4b56f0590f4096f0db5f059cdcd4ad1724b4cf332d0cdbfe7089c73674": {
+    "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+    "status": "EMPTY_WINDOW",
+    "run_id": 45595303130,
+    "job_id": 139139755541
+  },
+  "4f8f06337fb9402fd6589bbd26e5085c8c8fe0465faadd4f7e1a512bd3b605d7": {
+    "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+    "status": "EMPTY_WINDOW",
+    "run_id": 45595303130,
+    "job_id": 139139755541
+  },
+  "0b450246edbfe9883a4824c96f22e77af51205183ad208e9d0f511ee366a3d75": {
+    "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+    "status": "EMPTY_WINDOW",
+    "run_id": 45595303130,
+    "job_id": 139139755541
   }
 }

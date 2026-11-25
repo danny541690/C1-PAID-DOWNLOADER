@@ -189,8 +189,11 @@ def main():
     for spec in reused:
         status = evidence[probe_key(spec)]["status"]
         print(f"reused_window {spec[0]} {spec[3]} {spec[4]} {status}")
+    reused_gaps = sum(evidence[probe_key(spec)]["status"] == "EMPTY_WINDOW" for spec in reused)
     if not pending:
-        print("dataset_pilot=PASS_NO_NEW_REQUESTS")
+        print("dataset_requests_sent=0")
+        print(f"historical_windows_with_no_evidence={reused_gaps}")
+        print("dataset_pilot=" + ("PASS_WITH_COVERAGE_GAPS" if reused_gaps else "PASS_NO_NEW_REQUESTS"))
         return 0
     token = os.environ.get("FINMIND_BACKER_TOKEN")
     if not token:
@@ -205,7 +208,7 @@ def main():
         status in {"VALID_SAMPLE", "EMPTY_WINDOW"} for status in results.values()
     )
     gaps = sum(status == "EMPTY_WINDOW" for status in results.values())
-    gaps += sum(evidence[probe_key(spec)]["status"] == "EMPTY_WINDOW" for spec in reused)
+    gaps += reused_gaps
     print(f"historical_windows_with_no_evidence={gaps}")
     print("dataset_pilot=" + ("PASS_WITH_COVERAGE_GAPS" if passed and gaps else
                              "PASS" if passed else "HOLD"))
