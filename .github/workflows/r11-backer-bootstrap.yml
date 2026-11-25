@@ -44,9 +44,63 @@ jobs:
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
           FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
         run: python3 -m scripts.r11_backer.live_preflight
+  remote-seed:
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      seed: ${{ steps.create.outputs.seed }}
+    steps:
+      - id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch="codex/r11-cas-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          api="repos/$GITHUB_REPOSITORY"
+          path=".jarvis-test/r11-synthetic.json"
+          gh api "$api/git/refs" -f ref="refs/heads/$branch" -f sha="$GITHUB_SHA" >/dev/null
+          payload=$(printf '{"remaining":1,"owner":null}' | base64 -w0)
+          seed=$(gh api --method PUT "$api/contents/$path" -f branch="$branch" -f content="$payload" -f message='Seed synthetic quota test' --jq .content.sha)
+          test -n "$seed"
+          printf 'seed=%s\n' "$seed" >> "$GITHUB_OUTPUT"
+  remote-claim:
+    needs: remote-seed
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [alpha, beta, gamma]
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          SEED: ${{ needs.remote-seed.outputs.seed }}
+          WORKER: ${{ matrix.worker }}
+        run: |
+          set -euo pipefail
+          branch="codex/r11-cas-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          api="repos/$GITHUB_REPOSITORY/contents/.jarvis-test/r11-synthetic.json"
+          payload=$(printf '{"remaining":0,"owner":"%s"}' "$WORKER" | base64 -w0)
+          if gh api --method PUT "$api" -f branch="$branch" -f sha="$SEED" -f content="$payload" -f message='Claim synthetic quota' >"$RUNNER_TEMP/claim" 2>"$RUNNER_TEMP/claim-error"; then
+            result=GRANTED
+          else
+            grep -Eq 'HTTP (409|422)' "$RUNNER_TEMP/claim-error"
+            result=STALE_REJECTED
+          fi
+          state=$(gh api "$api?ref=$branch" --jq '.content | @base64d | fromjson')
+          jq -e '.remaining == 0 and (.owner == "alpha" or .owner == "beta" or .owner == "gamma")' <<< "$state" >/dev/null
+          if [[ "$result" == GRANTED ]]; then
+            jq -e --arg worker "$WORKER" '.owner == $worker' <<< "$state" >/dev/null
+          else
+            jq -e --arg worker "$WORKER" '.owner != $worker' <<< "$state" >/dev/null
+          fi
+          printf 'synthetic_claim=%s\n' "$result"
   pilot-verdict:
     if: always() && github.event_name == 'push'
-    needs: [synthetic-checks, live-read-only-preflight]
+    needs: [synthetic-checks, live-read-only-preflight, remote-claim]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -54,6 +108,7 @@ jobs:
         env:
           REGRESSION: ${{ needs.synthetic-checks.result }}
           LIVE_JOB: ${{ needs.live-read-only-preflight.result }}
+          REMOTE: ${{ needs.remote-claim.result }}
           LIVE_PILOT: ${{ needs.live-read-only-preflight.outputs.pilot }}
           DRIVE: ${{ needs.live-read-only-preflight.outputs.drive }}
           FINMIND: ${{ needs.live-read-only-preflight.outputs.finmind }}
@@ -61,7 +116,7 @@ jobs:
           RECENT: ${{ needs.live-read-only-preflight.outputs.recent }}
         run: |
           verdict=HOLD
-          if [[ "$REGRESSION" == success && "$LIVE_JOB" == success && "$LIVE_PILOT" == PASS ]]; then
+          if [[ "$REGRESSION" == success && "$LIVE_JOB" == success && "$LIVE_PILOT" == PASS && "$REMOTE" == success ]]; then
             verdict=PASS
           fi
           {
@@ -72,6 +127,7 @@ jobs:
             printf -- '- FinMind account quota: %s\n' "${FINMIND:-NO_RESULT}"
             printf -- '- Historical sample: %s\n' "${HISTORICAL:-NO_RESULT}"
             printf -- '- Recent 120-day sample: %s\n' "${RECENT:-NO_RESULT}"
+            printf -- '- Cross-runner synthetic quota: %s\n' "$REMOTE"
             printf -- '- Production release: HOLD (outside this pilot)\n'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           test "$verdict" = PASS
