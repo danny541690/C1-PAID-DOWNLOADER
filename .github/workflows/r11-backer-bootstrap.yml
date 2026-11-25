@@ -562,6 +562,63 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: '"$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_closeout --verify-only'
+  market-listing-chronology:
+    name: Reconcile official listing archives and the 2301 code change
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-listing-chronology]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official publication readers
+        run: |
+          if ! command -v antiword >/dev/null || ! command -v pdftotext >/dev/null; then
+            if ! sudo apt-get install -y -qq antiword poppler-utils; then
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq antiword poppler-utils
+            fi
+          fi
+      - name: Check dated official evidence and save the updated pending ledger to private Drive
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.market_chronology
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-market-chronology-${{ github.run_attempt }}
+          path: r11-market-chronology.json
+          if-no-files-found: error
+          retention-days: 30
+  market-listing-chronology-readback:
+    name: Reproduce historical code and date assignments from private Drive
+    needs: [market-listing-chronology, synthetic-checks]
+    if: needs.market-listing-chronology.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official publication readers
+        run: |
+          if ! command -v antiword >/dev/null || ! command -v pdftotext >/dev/null; then
+            if ! sudo apt-get install -y -qq antiword poppler-utils; then
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq antiword poppler-utils
+            fi
+          fi
+      - name: Verify original digests and reproduce the listing decisions
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.market_chronology --verify-only
   manifest-preview:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
     runs-on: ubuntu-latest
@@ -793,6 +850,8 @@ jobs:
       - tpex-official-calendar-readback
       - tpex-historical-closeout
       - tpex-historical-closeout-readback
+      - market-listing-chronology
+      - market-listing-chronology-readback
       - manifest-preview
       - manifest-readback
       - integration-b00

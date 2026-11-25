@@ -784,3 +784,31 @@ class TPExHistoricalEvidenceTests(unittest.TestCase):
         self.assertEqual(verified_handover_intervals({"1234": [start, start]}, {"1234": [end]}, [profile], summary), [])
         self.assertEqual(verified_handover_intervals({"1234": [start]}, {"1234": [end]},
                                                      [profile | {"issuer": "乙股份有限公司"}], summary), [])
+
+    def test_legacy_listing_date_is_read_from_the_complete_table_cell(self):
+        from scripts.r11_backer.market_chronology import parse_listing_book
+
+        doc = """<book><para>表一、八十八年度新上櫃公司資料</para><informaltable><tbody>
+          <row><entry>上櫃
+          日期</entry><entry>編號</entry><entry>公司名稱</entry></row>
+          <row><entry>88.12.01</entry><entry>1234</entry><entry>甲公司</entry></row>
+          </tbody></informaltable></book>"""
+        self.assertEqual(parse_listing_book(doc, 1999)["1234"]["start"], "1999-12-01")
+        with self.assertRaises(ValueError):
+            parse_listing_book(doc.replace("88.12.01", "88.12.0"), 1999)
+
+    def test_listing_sources_conflict_or_missing_symbol_proof_keeps_interval_pending(self):
+        from scripts.r11_backer.market_chronology import PENDING, reconcile_pending
+        from scripts.r11_backer.market_lifetimes import Event
+
+        otc = Event("TPEx", "1234", "甲公司股份有限公司", date(2011, 3, 7), "tp-end")
+        main = Event("TWSE", "5678", "乙公司", date(2015, 2, 6), "tw-end")
+        other = Event("TPEx", "1234", "甲公司", date(2000, 1, 6), "different-start")
+        ledger = {"held_intervals_detail": [{"source": event.source, "reason": PENDING} for event in (otc, main)]}
+        end_rows = {("TPEx", otc.code): [otc], ("TWSE", main.code): [main]}
+        yearbook = {otc.code: [{"issuer": "甲公司", "start": "2000-01-07", "source": "yearbook#3"}]}
+        dates = [(date(1983, 1, 26), "LISTED", "乙公司")]
+        accepted, held, _ = reconcile_pending(ledger, [], {("TPEx", otc.code): [other]}, end_rows, yearbook, dates, [])
+        self.assertEqual(accepted, [])
+        self.assertEqual([row["disposition"] for row in held],
+                         ["HOLD_OFFICIAL_START_DATE_CONFLICT", "HOLD_HISTORICAL_SYMBOL_LINK"])
