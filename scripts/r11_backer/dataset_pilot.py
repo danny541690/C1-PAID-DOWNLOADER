@@ -52,6 +52,29 @@ PROBES = (
 )
 
 
+# Earlier windows are separate evidence from the already verified recent samples.
+HISTORICAL_WINDOWS = (
+    ("TaiwanStockPrice", "1994-09-01", "1994-09-30"),
+    ("TaiwanStockPrice", "2008-10-01", "2008-10-10"),
+    ("TaiwanStockPrice", "2016-01-04", "2016-01-08"),
+    ("TaiwanStockPriceAdj", "1994-09-01", "1994-09-30"),
+    ("TaiwanStockPriceAdj", "2008-10-01", "2008-10-10"),
+    ("TaiwanStockFinancialStatements", "1991-10-01", "1991-12-31"),
+    ("TaiwanStockFinancialStatements", "2012-12-31", "2012-12-31"),
+    ("TaiwanStockFinancialStatements", "2013-03-31", "2013-03-31"),
+    ("TaiwanStockBalanceSheet", "2013-03-31", "2013-03-31"),
+    ("TaiwanStockCashFlowsStatement", "2013-03-31", "2013-03-31"),
+    ("TaiwanStockMonthRevenue", "2002-01-01", "2002-03-31"),
+    ("TaiwanStockMonthRevenue", "2013-01-01", "2013-03-31"),
+    ("TaiwanStockInstitutionalInvestorsBuySell", "2004-10-01", "2004-10-08"),
+    ("TaiwanStockMarginPurchaseShortSale", "2001-01-02", "2001-01-08"),
+    ("TaiwanStockHoldingSharesPer", "2019-01-01", "2019-01-15"),
+    ("TaiwanFuturesDaily", "2008-10-01", "2008-10-03"),
+    ("TaiwanExchangeRate", "2006-01-02", "2006-01-08"),
+    ("TaiwanStockDividendResult", "2015-06-01", "2015-07-31"),
+)
+
+
 def classify(payload, start, end, fields, *, identity_field="stock_id", identity="2330"):
     if not isinstance(payload, dict):
         return "INVALID_RESPONSE"
@@ -111,7 +134,7 @@ def split_probes(specs, evidence):
     return reused, pending
 
 
-def run_pending(pending, token, workers=6):
+def run_pending(pending, token, workers=12):
     """Keep the worker pool full until a provider limit stops new submissions."""
     remaining = iter(pending)
     completed = {}
@@ -135,6 +158,15 @@ def run_pending(pending, token, workers=6):
     return completed
 
 
+def pilot_probes():
+    by_dataset = {spec[0]: spec for spec in PROBES}
+    historical = []
+    for dataset, start, end in HISTORICAL_WINDOWS:
+        _, code, key, _, _, fields = by_dataset[dataset]
+        historical.append((dataset, code, key, start, end, fields))
+    return (*PROBES, *historical)
+
+
 def main():
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group()
@@ -142,7 +174,7 @@ def main():
     mode.add_argument("--count", action="store_true")
     args = parser.parse_args()
     evidence = json.loads(Path(__file__).with_name("sample_evidence.json").read_text())
-    reused, pending = split_probes(PROBES, evidence)
+    reused, pending = split_probes(pilot_probes(), evidence)
     if args.count:
         print(len(pending))
         return 0
@@ -162,7 +194,7 @@ def main():
     results = run_pending(pending, token)
     for spec in pending:
         status = results.get(probe_key(spec), "NOT_SENT_RATE_LIMIT")
-        print(f"{spec[0]}={status}")
+        print(f"window {probe_key(spec)} {spec[0]} {spec[3]} {spec[4]} {status}")
     print(f"dataset_requests_sent={len(results)}")
     passed = len(results) == len(pending) and all(
         status == "VALID_SAMPLE" for status in results.values()

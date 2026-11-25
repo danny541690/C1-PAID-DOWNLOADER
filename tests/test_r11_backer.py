@@ -227,3 +227,13 @@ class DatasetPilotTests(unittest.TestCase):
             results = run_pending(PROBES[:3], "test-token", workers=1)
         self.assertEqual(results, {probe_key(PROBES[0]): "RATE_LIMITED"})
         self.assertEqual(request.call_count, 1)
+
+    def test_historical_windows_keep_dataset_specific_identity_and_distinct_keys(self):
+        from scripts.r11_backer.dataset_pilot import PROBES, pilot_probes, probe_key
+
+        combined = pilot_probes()
+        self.assertEqual(combined[:len(PROBES)], PROBES)
+        self.assertEqual(len({probe_key(spec) for spec in combined}), len(combined))
+        early = next(spec for spec in combined if spec[3] == "1991-10-01")
+        self.assertEqual(early[:3], ("TaiwanStockFinancialStatements", "2330", "stock_id"))
+        self.assertIn("origin_name", early[-1])
