@@ -143,3 +143,36 @@ class RollingQuotaTests(unittest.TestCase):
         for purpose in ("download", "probe", "retry"):
             self.assertFalse(can_reserve([], 189, purpose, paused_until=deadline))
             self.assertTrue(can_reserve([], 190, purpose, paused_until=deadline))
+
+
+class PublicCatalogTests(unittest.TestCase):
+    def test_union_preserves_exclusions_catalog_drift_and_entitlement_holds(self):
+        from scripts.r11_backer.reconcile_catalog import documented_tiers, reconcile
+
+        catalog = documented_tiers(
+            "### Allowed\n- **Tier:** Backer\n"
+            "### Unwanted\n- **Tier:** Backer\n"
+            "### Upgrade\n- **Tier:** Sponsor Pro\n"
+            "### Discovered\n- **Tier:** Free(w/ data_id)\n"
+        )
+        candidates = [
+            {"dataset": name, "routing": route}
+            for name, route in [
+                ("Allowed", "B01"), ("Unwanted", "EXCLUDE"),
+                ("Upgrade", "B02"), ("Missing", "REVIEW"),
+            ]
+        ]
+        result = {row["dataset"]: row for row in reconcile(candidates, catalog)}
+        self.assertEqual(result["Allowed"]["verdict"], "HOLD_LIVE_ENTITLEMENT_AND_CONTRACT")
+        self.assertEqual(result["Unwanted"]["verdict"], "EXCLUDED_BY_SCOPE")
+        self.assertEqual(result["Upgrade"]["verdict"], "HOLD_DOCUMENTED_HIGHER_TIER")
+        self.assertEqual(result["Missing"]["verdict"], "HOLD_MISSING_FROM_DOCUMENTATION")
+        self.assertEqual(result["Discovered"]["verdict"], "HOLD_SCOPE_REVIEW")
+        self.assertTrue(all(row["live_entitlement"] == "NOT_TESTED" for row in result.values()))
+
+    def test_empty_and_duplicated_documents_fail(self):
+        from scripts.r11_backer.reconcile_catalog import documented_tiers
+
+        for value in ("empty", "### Repeat\n- **Tier:** Backer\n" * 2):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                documented_tiers(value)

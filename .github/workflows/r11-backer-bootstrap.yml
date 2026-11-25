@@ -27,6 +27,19 @@ jobs:
         run: python3 -m scripts.r11_backer.preflight --catalog-only
       - name: Run synthetic archive and preflight tests
         run: python3 -m unittest discover -s tests -p test_r11_backer.py -v
+  public-catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconcile pinned public documentation and historical candidates
+        run: python3 -m scripts.r11_backer.reconcile_catalog
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r11-public-catalog-${{ github.run_attempt }}
+          path: r11-public-catalog.json
+          if-no-files-found: error
+          retention-days: 14
   live-read-only-preflight:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight'
     runs-on: ubuntu-latest
@@ -156,12 +169,13 @@ jobs:
         run: bash scripts/r11_backer/recovery_pilot.sh
   pilot-verdict:
     if: always() && github.event_name == 'push'
-    needs: [synthetic-checks, live-read-only-preflight, remote-claim, drive-round-trip]
+    needs: [synthetic-checks, public-catalog, live-read-only-preflight, remote-claim, drive-round-trip]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Publish consolidated pilot verdict
         env:
+          CATALOG: ${{ needs.public-catalog.result }}
           REGRESSION: ${{ needs.synthetic-checks.result }}
           LIVE_JOB: ${{ needs.live-read-only-preflight.result }}
           DRIVE_ROUND_TRIP: ${{ needs.drive-round-trip.result }}
@@ -173,12 +187,13 @@ jobs:
           RECENT: ${{ needs.live-read-only-preflight.outputs.recent }}
         run: |
           verdict=HOLD
-          if [[ "$REGRESSION" == success && "$LIVE_JOB" == success && "$LIVE_PILOT" == PASS && "$REMOTE" == success && "$DRIVE_ROUND_TRIP" == success ]]; then
+          if [[ "$REGRESSION" == success && "$CATALOG" == success && "$LIVE_JOB" == success && "$LIVE_PILOT" == PASS && "$REMOTE" == success && "$DRIVE_ROUND_TRIP" == success ]]; then
             verdict=PASS
           fi
           {
             printf '## Backer pre-release pilot\n\n'
             printf -- '- Pilot verdict: %s\n' "$verdict"
+            printf -- '- Public catalog reconciliation: %s\n' "$CATALOG"
             printf -- '- Synthetic regression: %s\n' "$REGRESSION"
             printf -- '- Drive metadata and target: %s\n' "${DRIVE:-NO_RESULT}"
             printf -- '- FinMind account quota: %s\n' "${FINMIND:-NO_RESULT}"
