@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from .contract_closeout import dated_market_members
 from .drive_pilot import BASE, FOLDER, ensure, token as drive_token
 from .exchange_scope import EXCHANGES, parse_official_close, price_value
-from .history_pilot import iso_date
+from .history_pilot import TWSE_CALENDAR_DOC, iso_date, twse_month
 from .live_preflight import read_json
 from .release_gaps import BULK_MAX_BYTES
 from .release_probes import MAX_BYTES, RECOVERY_ROOT, Sample, Task, read_private_file, recovery_location, request_sample, run_parallel
@@ -29,6 +29,7 @@ from .test_archive import confirmed_drive_zip, json_bytes
 
 
 GAP_DAY = date(2010, 11, 24)
+EVIDENCE_RUN = 45659972821
 TRANSFERS = {
     "1597": date(2020, 12, 23), "5306": date(2022, 3, 8),
     "6446": date(2024, 1, 25), "8908": date(2026, 10, 16),
@@ -124,6 +125,18 @@ def yearbook_days(data, year):
     return days
 
 
+def compare_calendar(year, yearbook, vendor):
+    if vendor is None:
+        return {"status": "HOLD_FINMIND_CALENDAR_UNAVAILABLE", "yearbook_dates": len(yearbook)}, set()
+    current = {day for day in vendor if day.year == year}
+    conflicts = yearbook ^ current
+    result = {"status": "HOLD_CALENDAR_DATE_CONFLICT" if conflicts else "PASS_RECONCILED_CALENDAR_SAMPLE",
+              "yearbook_dates": len(yearbook), "dates_agree": len(yearbook & current),
+              "tpex_yearbook_only": sorted(day.isoformat() for day in yearbook - current),
+              "finmind_only": sorted(day.isoformat() for day in current - yearbook)}
+    return result, yearbook & current
+
+
 def termination_rows(data, year):
     content = json.loads(data)
     if str(content.get("date")) != str(year) or content.get("stat", "").lower() != "ok" or len(content["tables"]) != 1:
@@ -212,9 +225,7 @@ def save_private(public_payloads, source_urls, paid, details):
     confirmed_drive_zip(access, private_folder(access, create=True), ARCHIVE, payload.getvalue())
 
 
-def verify_archive():
-    access = drive_token()
-    root = private_folder(access, create=False)
+def verified_archive_files(access, root):
     file_id = ensure(root, ARCHIVE, "application/zip", access, create=False)
     if read_json(f"{BASE}/files/{file_id}?fields=shared", access).get("shared") is not False:
         raise ValueError("private evidence file is shared")
@@ -222,9 +233,50 @@ def verify_archive():
         expected = json.loads(archive.read("hashes.json"))
         if set(archive.namelist()) != set(expected) | {"hashes.json"} or archive.testzip() is not None:
             raise ValueError("incomplete historical evidence archive")
-        if any(hashlib.sha256(archive.read(name)).hexdigest() != digest for name, digest in expected.items()):
+        files = {name: archive.read(name) for name in expected}
+        if any(hashlib.sha256(files[name]).hexdigest() != digest for name, digest in expected.items()):
             raise ValueError("historical evidence digest mismatch")
-    print(f"tpex_identity_drive_readback=PASS files={len(expected)}")
+    return files
+
+
+def verify_archive():
+    access = drive_token()
+    files = verified_archive_files(access, private_folder(access, create=False))
+    print(f"tpex_identity_drive_readback=PASS files={len(files)}")
+
+
+def reconcile_archived_calendar():
+    access = drive_token()
+    previous = ensure(RECOVERY_ROOT, f"R11_TPEX_HISTORY_{EVIDENCE_RUN}_1", FOLDER, access, create=False)
+    if read_json(f"{BASE}/files/{previous}?fields=shared", access).get("shared") is not False:
+        raise ValueError("historical input folder is shared")
+    files = verified_archive_files(access, previous)
+    evidence = json.loads(files["reconciliation.json"])
+    calendar = next(item for item in evidence["backer_requests"] if item["request"]["dataset"] == "TaiwanStockTradingDate")
+    if calendar["status"] != "VALID_SAMPLE":
+        raise ValueError("no verified FinMind calendar source to reconcile")
+    vendor_days = {iso_date(row["date"]) for row in json.loads(files[calendar["original"]])["data"]}
+    years, agreed, conflict_days = {}, {}, set()
+    for year, days in evidence["tpex_yearbook_sessions"].items():
+        yearbook = set(map(iso_date, days))
+        years[year], common = compare_calendar(int(year), yearbook, vendor_days)
+        agreed[year] = sorted(day.isoformat() for day in common)
+        conflict_days.update(iso_date(day) for side in ("tpex_yearbook_only", "finmind_only") for day in years[year][side])
+    months = {day.replace(day=1) for day in conflict_days}
+    checks = {month: twse_month(month) for month in sorted(months)}
+    conflicts = []
+    for day in sorted(conflict_days):
+        status, twse = checks[day.replace(day=1)]
+        conflicts.append({"date": day.isoformat(), "iso_weekday": day.isoweekday(),
+                          "twse_reference_status": status, "twse_report_has_session": day in twse if status == "PASS" else None,
+                          "disposition": "HOLD_CONFLICTING_TPEX_SESSION_EVIDENCE"})
+    report = {"status": "PASS_DIAGNOSTIC", "private_archive": "STAGED", "production": "HOLD",
+              "source_run": EVIDENCE_RUN, "calendars": years, "conflicts": conflicts,
+              "twse_context_source": TWSE_CALENDAR_DOC, "finmind_requests": 0}
+    save_private({}, {}, {}, report | {"agreed_session_dates": agreed,
+                                        "source_annual_index_sha256": {year: hashlib.sha256(files[f'official/yearbook-{year}.xls']).hexdigest()
+                                                                       for year in agreed}})
+    return report
 
 
 def run():
@@ -312,10 +364,8 @@ def run():
         except Exception:
             calendars[str(year)] = {"status": "HOLD_TPEX_YEARBOOK"}
             continue
-        official_only = dates - vendor_days if vendor_days is not None else None
         sessions[str(year)] = [session.isoformat() for session in sorted(dates, reverse=True)]
-        calendars[str(year)] = {"status": "PASS_OFFICIAL_TPEX_INDEX_SESSIONS", "sessions": len(dates),
-                                "official_only_vs_finmind": len(official_only) if official_only is not None else None}
+        calendars[str(year)], _ = compare_calendar(year, dates, vendor_days)
 
     save_private(payloads, source_urls, paid, {"tpex_yearbook_sessions": sessions, "confirmed_transfer_periods": periods,
                                              "historical_price_gaps": gap_details, "official_termination_years": years_verified})
@@ -335,13 +385,15 @@ def run():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--verify-only", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--verify-only", action="store_true")
+    modes.add_argument("--reconcile-calendar", action="store_true")
     args = parser.parse_args()
     try:
         if args.verify_only:
             verify_archive()
             return 0
-        report = run()
+        report = reconcile_archived_calendar() if args.reconcile_calendar else run()
     except Exception as error:
         report = {"status": "HOLD_INFRASTRUCTURE", "failure_class": type(error).__name__, "production": "HOLD"}
         if args.verify_only:

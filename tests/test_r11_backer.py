@@ -585,6 +585,16 @@ class HistoricalCapacityPilotTests(unittest.TestCase):
 
 
 class TPExHistoricalEvidenceTests(unittest.TestCase):
+    def test_calendar_with_adjacent_conflicting_dates_keeps_only_agreed_dates(self):
+        from scripts.r11_backer.tpex_history import compare_calendar
+
+        agreed, sunday, monday = (date(1999, 5, day) for day in (29, 30, 31))
+        report, dates = compare_calendar(1999, {agreed, sunday}, {agreed, monday, date(2000, 1, 1)})
+        self.assertEqual(report['status'], 'HOLD_CALENDAR_DATE_CONFLICT')
+        self.assertEqual(report['tpex_yearbook_only'], ['1999-05-30'])
+        self.assertEqual(report['finmind_only'], ['1999-05-31'])
+        self.assertEqual(dates, {agreed})
+
     def test_transfer_window_requires_exclusive_membership_and_matching_prices(self):
         from decimal import Decimal
         from scripts.r11_backer.release_probes import Sample

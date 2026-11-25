@@ -358,7 +358,7 @@ jobs:
           retention-days: 30
   tpex-market-history:
     name: Reconcile TPEx sessions and effective market identity
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-tpex-history]')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-tpex-history]') || contains(github.event.head_commit.message, '[r11-tpex-calendar-check]'))
     runs-on: ubuntu-latest
     timeout-minutes: 6
     outputs:
@@ -368,6 +368,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the official yearbook reader
+        if: contains(github.event.head_commit.message, '[r11-tpex-history]')
         run: |
           python3 -m venv "$RUNNER_TEMP/r11-tpex"
           "$RUNNER_TEMP/r11-tpex/bin/python" -m pip install --disable-pip-version-check --no-deps xlrd==2.0.1
@@ -378,7 +379,13 @@ jobs:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-        run: '"$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_history'
+          R11_TPEX_CALENDAR_ONLY: ${{ contains(github.event.head_commit.message, '[r11-tpex-calendar-check]') }}
+        run: |
+          if [[ "$R11_TPEX_CALENDAR_ONLY" == true ]]; then
+            python3 -m scripts.r11_backer.tpex_history --reconcile-calendar
+          else
+            "$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_history
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
