@@ -66,7 +66,8 @@ jobs:
           test -n "$seed"
           printf 'seed=%s\n' "$seed" >> "$GITHUB_OUTPUT"
   remote-claim:
-    needs: remote-seed
+    needs: [remote-seed, live-read-only-preflight]
+    if: needs.live-read-only-preflight.outputs.pilot == 'PASS'
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -102,6 +103,19 @@ jobs:
           printf 'result=%s\n' "$result" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         if: steps.claim.outputs.result == 'GRANTED'
+      - name: Make one real Backer request against the reserved pilot slot
+        if: steps.claim.outputs.result == 'GRANTED'
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: |
+          python3 - <<'PYCODE'
+          from datetime import date
+          from scripts.r11_backer.live_preflight import probe_business_indicator
+
+          status = probe_business_indicator(date(1982, 1, 1), date(1982, 1, 31))
+          print(f"quota_gated_backer_probe={status}")
+          raise SystemExit(status != "VALID_MONTH_SAMPLE")
+          PYCODE
       - name: Write isolated archive with the single granted claim
         if: steps.claim.outputs.result == 'GRANTED'
         env:
@@ -154,7 +168,7 @@ jobs:
             printf -- '- FinMind account quota: %s\n' "${FINMIND:-NO_RESULT}"
             printf -- '- Historical sample: %s\n' "${HISTORICAL:-NO_RESULT}"
             printf -- '- Recent 120-day sample: %s\n' "${RECENT:-NO_RESULT}"
-            printf -- '- Cross-runner synthetic quota: %s\n' "$REMOTE"
+            printf -- '- Cross-runner quota reservation and bounded Backer request: %s\n' "$REMOTE"
             printf -- '- Drive synthetic archive and cross-runner recovery: %s\n' "$DRIVE_ROUND_TRIP"
             printf -- '- Production release: HOLD (outside this pilot)\n'
           } | tee -a "$GITHUB_STEP_SUMMARY"
