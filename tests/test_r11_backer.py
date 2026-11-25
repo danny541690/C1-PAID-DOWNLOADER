@@ -176,3 +176,21 @@ class PublicCatalogTests(unittest.TestCase):
         for value in ("empty", "### Repeat\n- **Tier:** Backer\n" * 2):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 documented_tiers(value)
+
+
+class DatasetPilotTests(unittest.TestCase):
+    def test_probe_distinguishes_empty_denied_and_rate_limited(self):
+        from scripts.r11_backer.dataset_pilot import classify
+
+        def status(payload):
+            return classify(payload, "2026-11-02", "2026-11-04", {"stock_id", "open"})
+
+        self.assertEqual(status({"status": 403}), "ACCESS_DENIED")
+        self.assertEqual(status({"status": 429}), "RATE_LIMITED")
+        self.assertEqual(status({"status": 200, "data": []}), "EMPTY_WINDOW")
+        row = {"stock_id": "2330", "open": 1, "date": "2026-11-03"}
+        self.assertEqual(status({"status": 200, "data": [row]}), "VALID_SAMPLE")
+        self.assertEqual(
+            status({"status": 200, "data": [row | {"date": "2026-11-05"}]}),
+            "DATE_OUTSIDE_WINDOW",
+        )
