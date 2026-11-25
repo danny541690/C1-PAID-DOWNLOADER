@@ -511,3 +511,47 @@ class ReleaseRemediationTests(unittest.TestCase):
         intraday = gold_outcome(Sample("VALID_SAMPLE", rows=(same, same, later)))
         self.assertEqual(intraday["status"], "EXCLUDE_SUBDAILY_SOURCE_SERIES")
         self.assertEqual(intraday["most_common_interval_seconds"], 300)
+
+
+class HistoricalCapacityPilotTests(unittest.TestCase):
+    def test_month_manifest_detects_gaps_and_keeps_raw_offsets_after_sorting(self):
+        from scripts.r11_backer.history_pilot import (
+            BUSINESS_START, NDC_PERIOD, classify_business, months, raw_month_manifest,
+        )
+        from scripts.r11_backer.release_probes import Sample
+
+        rows = tuple({"date": day.isoformat(), "leading": 1, "coincident": 1, "lagging": 1,
+                      "monitoring": 41, "monitoring_color": "sample"} for day in months(BUSINESS_START, NDC_PERIOD))
+        trial = date(2026, 11, 26)
+        suffix = Sample("VALID_SAMPLE", rows=rows[-5:])
+        earlier = Sample("EMPTY_WINDOW")
+        result, index = classify_business(Sample("VALID_SAMPLE", rows=rows), suffix, earlier, trial)
+        self.assertEqual(result["status"], "PASS_PROVIDER_WINDOW")
+        self.assertEqual(result["verified_months"], 537)
+        self.assertEqual(raw_month_manifest(index)["newest_first_month_offsets"][:1], [["2026-09", 536]])
+        incomplete = Sample("VALID_SAMPLE", rows=rows[:1] + rows[2:])
+        blocked, _ = classify_business(incomplete, suffix, earlier, trial)
+        self.assertEqual(blocked["status"], "HOLD_UNVERIFIED_MONTHLY_WINDOW")
+        self.assertEqual(blocked["missing_months"], 1)
+
+    def test_calendar_gap_counts_old_trade_as_known_without_releasing_history(self):
+        from scripts.r11_backer.history_pilot import BENCHMARK_ARCHIVE_BYTES, calendar_evidence
+        from scripts.r11_backer.release_probes import Sample
+
+        calendar = Sample("VALID_SAMPLE", rows=({"date": "1999-01-05"}, {"date": "2026-11-24"}))
+        prices = Sample("VALID_SAMPLE", rows=({"date": "1994-09-05", "stock_id": "2330"},))
+        result = calendar_evidence(calendar, prices)
+        self.assertEqual(result["status"], "HOLD_CALENDAR_ROSTER_GAP")
+        self.assertEqual(result["early_trade_days_missing_from_calendar"], 1)
+        self.assertEqual(result["illustrative_known_day_bytes"], 3 * BENCHMARK_ARCHIVE_BYTES)
+
+    def test_month_revenue_uses_official_release_and_next_day(self):
+        from scripts.r11_backer.history_pilot import revenue_evidence
+        from scripts.r11_backer.release_probes import Sample
+
+        rows = tuple({"date": f"2026-{month:02}-01", "revenue_year": 2026, "revenue_month": month,
+                      "stock_id": "2330", "create_time": "2026-11-26"} for month in (9, 10))
+        report = revenue_evidence(Sample("VALID_SAMPLE", rows=rows))
+        self.assertEqual(report["status"], "PASS_PIT_PUBLICATION_DATE_SAMPLE")
+        self.assertEqual(report["periods"][1]["official_announced_on"], "2026-11-10")
+        self.assertEqual(report["periods"][1]["pit_calendar_lower_bound"], "2026-11-11")

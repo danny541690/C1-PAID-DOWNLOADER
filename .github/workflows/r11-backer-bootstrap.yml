@@ -276,6 +276,48 @@ jobs:
           path: r11-release-remediation.json
           if-no-files-found: error
           retention-days: 30
+  history-capacity:
+    name: Validate historical windows, publication dates and capacity
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-history-capacity]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    outputs:
+      archive: ${{ steps.history.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check real Backer periods and stage one private monthly archive
+        id: history
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.history_pilot
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-history-capacity-${{ github.run_attempt }}
+          path: r11-history-capacity.json
+          if-no-files-found: error
+          retention-days: 30
+  history-readback:
+    name: Independently verify the historical archive and month index
+    needs: [history-capacity, synthetic-checks]
+    if: needs.history-capacity.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Rebuild the month index and compare both digests
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.history_pilot --verify-only
   manifest-preview:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
     runs-on: ubuntu-latest
