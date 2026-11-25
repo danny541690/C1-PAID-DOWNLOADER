@@ -730,3 +730,57 @@ class TPExHistoricalEvidenceTests(unittest.TestCase):
             self.assertEqual(resume_sources(1234, origins), {"a.json": ("REUSED_VERIFIED_SOURCE", b"original")})
             with self.assertRaises(ValueError):
                 resume_sources(1234, origins | {"b.json": "https://example.com/other"})
+
+    def test_managed_stock_turnover_matches_only_with_correct_session_scope(self):
+        from scripts.r11_backer.test_archive import json_bytes
+        from scripts.r11_backer.tpex_closeout import FULL_QUOTES, FIXED_QUOTES, managed_stock_reconciliation
+
+        def daily(title, columns, values):
+            return json_bytes({"stat": "ok", "date": "20101124", "tables": [
+                {"title": title, "fields": ["代號", *columns], "data": [["1234", *values]]},
+            ]})
+
+        fields = ["開盤", "最高", "最低", "收盤", "成交股數", "成交金額(元)", "成交筆數"]
+        ohlc = ["1.34", "1.39", "1.34", "1.39"]
+        source = "official/TPEx-2010-11-24.json"
+        paid = {"dataset": "TaiwanStockPrice", "start_date": "2010-11-24", "end_date": "2010-11-24"}
+        summary = {"backer_requests": [{"request": paid, "status": "VALID_SAMPLE", "original": "original.json"}],
+                   "historical_price_gaps": [{"code": "1234", "window_status": "HOLD_PROVIDER_WINDOW_EMPTY"}]}
+        baseline = {"reconciliation.json": json_bytes(summary), "original.json": json_bytes({"data": []}),
+                    source: daily("上櫃股票每日收盤行情(不含定價)", fields, [*ohlc, "80,000", "110,350", "10"])}
+        monthly = {"stat": "ok", "date": "20101101", "code": "1234", "tables": [
+            {"fields": ["日 期", "成交仟股", "成交仟元", "開盤", "最高", "最低", "收盤", "筆數"],
+             "notes": ["以上資料不含上櫃股票鉅額交易"],
+             "data": [["99/11/24", "82", "112", *ohlc, "16"]]},
+        ]}
+        responses = {FULL_QUOTES: daily("管理股票", fields, [*ohlc, "81,600", "112,411", "16"]),
+                     FIXED_QUOTES: daily("盤後定價行情", ["成交筆數"], ["0"]),
+                     "tpex-1234-2010-11.json": json_bytes(monthly)}
+        public, private = managed_stock_reconciliation(baseline, responses)
+        self.assertEqual(public["official_fallback_rows"], 1)
+        self.assertEqual(private["managed_stock_receipts"][0]["differences_from_regular"], [1600, 2061, 6])
+        self.assertEqual(private["managed_stock_receipts"][0]["backer_status"], "HOLD_PROVIDER_SCOPE_GAP")
+        monthly["tables"][0]["data"][0][-1] = "10"
+        public, _ = managed_stock_reconciliation(baseline, responses | {"tpex-1234-2010-11.json": json_bytes(monthly)})
+        self.assertEqual(public["status"], "HOLD_OFFICIAL_SCOPE")
+
+    def test_dated_transfer_requires_unique_otc_start_and_official_issuer_profile(self):
+        from scripts.r11_backer.market_lifetimes import Event
+        from scripts.r11_backer.tpex_closeout import verified_handover_intervals
+
+        start = Event("TPEx", "1234", "甲公司", date(2000, 5, 1), "tpex-start#1")
+        end = Event("TPEx", "1234", "甲公司股份有限公司", date(2010, 11, 24), "tpex-end#1")
+        profile = {"code": "1234", "issuer": end.issuer, "alias": "甲股", "company_id": "12345678",
+                   "start": str(end.day), "source": "official-profile#1"}
+        summary = {"handover_events": [{"code": "1234", "effective": str(end.day),
+                                        "proof": [end.source, "twse-listing#1"]}],
+                   "listing_intervals": [{"market": "TWSE", "code": "1234", "start": str(end.day),
+                                          "end_exclusive": "2026-11-26", "kind": "OFFICIAL_ACTIVE_THROUGH_PUBLICATION",
+                                          "proof": [profile["source"]]}],
+                   "held_intervals_detail": [{"market": "TPEx", "source": end.source,
+                                              "reason": "HOLD_UNPROVEN_HISTORICAL_START_OR_IDENTITY"}]}
+        rows = verified_handover_intervals({"1234": [start]}, {"1234": [end]}, [profile], summary)
+        self.assertEqual([(row["start"], row["end_exclusive"]) for row in rows], [(str(start.day), str(end.day))])
+        self.assertEqual(verified_handover_intervals({"1234": [start, start]}, {"1234": [end]}, [profile], summary), [])
+        self.assertEqual(verified_handover_intervals({"1234": [start]}, {"1234": [end]},
+                                                     [profile | {"issuer": "乙股份有限公司"}], summary), [])

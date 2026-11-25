@@ -505,6 +505,63 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: '"$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_calendar --verify-only'
+  tpex-historical-closeout:
+    name: Reconcile OTC early sessions, managed stocks and listing handovers
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-tpex-closeout]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official publication readers
+        run: |
+          if ! command -v pdftotext >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq poppler-utils
+          fi
+          python3 -m venv "$RUNNER_TEMP/r11-tpex"
+          "$RUNNER_TEMP/r11-tpex/bin/python" -m pip install --disable-pip-version-check --no-deps xlrd==2.0.1
+      - name: Reconcile dated original sources and save the evidence to private Drive
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: '"$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_closeout'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-tpex-closeout-${{ github.run_attempt }}
+          path: r11-tpex-historical-closeout.json
+          if-no-files-found: error
+          retention-days: 30
+  tpex-historical-closeout-readback:
+    name: Reproduce OTC historical results from private Drive
+    needs: [tpex-historical-closeout, synthetic-checks]
+    if: needs.tpex-historical-closeout.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official publication readers
+        run: |
+          if ! command -v pdftotext >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq poppler-utils
+          fi
+          python3 -m venv "$RUNNER_TEMP/r11-tpex"
+          "$RUNNER_TEMP/r11-tpex/bin/python" -m pip install --disable-pip-version-check --no-deps xlrd==2.0.1
+      - name: Check source digests and reproduce all three reconciliations
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: '"$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_closeout --verify-only'
   manifest-preview:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
     runs-on: ubuntu-latest
@@ -734,6 +791,8 @@ jobs:
       - market-lifetime-readback
       - tpex-official-calendar
       - tpex-official-calendar-readback
+      - tpex-historical-closeout
+      - tpex-historical-closeout-readback
       - manifest-preview
       - manifest-readback
       - integration-b00
