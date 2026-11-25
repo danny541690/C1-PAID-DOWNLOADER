@@ -1,5 +1,6 @@
 """Consolidate outstanding date, field and historical identity checks."""
 
+import argparse
 from collections import Counter
 from datetime import date, datetime, timedelta
 import json
@@ -81,15 +82,14 @@ def historical_events(sample, current):
     options = []
     for row in sample.rows:
         code = row.get("stock_id")
-        if not isinstance(code, str) or not re.fullmatch(r"[0-9]{4}", code) or code in current:
+        if not isinstance(code, str) or not re.fullmatch(r"[0-9]{4}", code):
             continue
         try:
             day = date.fromisoformat(row["date"])
         except (ValueError, TypeError, KeyError):
             continue
-        if day.year == 2024:
-            options.append((day, code))
-    return sorted(set(options))[:4]
+        options.append((day, code))
+    return sorted(set(options), key=lambda item: (item[1] in current, -item[0].toordinal(), item[1]))[:4]
 
 
 def proof_of_delisted_coverage(results, events):
@@ -99,14 +99,19 @@ def proof_of_delisted_coverage(results, events):
             return Task("TaiwanStockPrice", (day + timedelta(days=offset_a)).isoformat(),
                         (day + timedelta(days=offset_b)).isoformat(), code)
         before, after = results[window(-21, -1)], results[window(1, 14)]
-        if before.status == "VALID_SAMPLE" and after.status == "EMPTY_WINDOW":
-            outcomes["HISTORICAL_PRICES_FOUND_AFTER_REMOVAL_FROM_CURRENT_MASTER"] += 1
+        if (before.status == "VALID_SAMPLE" and before.rows
+                and all(row.get("stock_id") == code for row in before.rows)
+                and after.status == "EMPTY_WINDOW"):
+            outcomes["PRICE_BEFORE_ANNOUNCED_DELISTING_AND_EMPTY_AFTER"] += 1
         else:
             outcomes["EVENT_SAMPLE_UNCONFIRMED"] += 1
     return dict(outcomes)
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--identity-only", action="store_true")
+    args = parser.parse_args()
     token = os.environ["FINMIND_BACKER_TOKEN"]
     with urlopen(SOURCE, timeout=20) as response:
         content = response.read(1_000_001)
@@ -114,15 +119,22 @@ def main():
         raise ValueError("public catalog exceeds expected size")
     registry = contracts(content.decode("utf-8"))
     cutoff = datetime.now(ZoneInfo("Asia/Taipei")).date()
-    initial = (
+    initial = [
         Task("TaiwanStockInfo", None, None),
         Task("TaiwanStockDelisting", "2024-01-01", "2024-12-31"),
-        Task("TaiwanStockConvertibleBondInfo", None, None),
-    )
+    ]
+    if args.identity_only:
+        initial.append(Task("TaiwanStockDelisting", "2026-09-01", "2026-11-24"))
+    else:
+        initial.append(Task("TaiwanStockConvertibleBondInfo", None, None))
     results = run_parallel(initial, registry, token)
-    bond = active_bond(results[initial[2]], "2026-11-02", "2026-11-06")
+    bond = None if args.identity_only else active_bond(results[initial[2]], "2026-11-02", "2026-11-06")
     current = market_universe(results[initial[0]].rows)
-    events = historical_events(results[initial[1]], current) if current else ()
+    event_feeds = [task for task in initial if task.dataset == "TaiwanStockDelisting"]
+    events = []
+    for task in event_feeds:
+        events.extend(item for item in historical_events(results[task], current) if item not in events)
+    events = events[:6]
     date_tasks = [
         Task("TaiwanStockPriceLimit", "2026-11-24", "2026-11-24", "2330", send_end=False),
         Task("GoldPrice", "2026-10-01", "2026-10-07"),
@@ -140,6 +152,8 @@ def main():
     if bond:
         fields.extend(Task(dataset, "2026-11-02", "2026-11-06", bond) for dataset in bond_datasets)
 
+    if args.identity_only:
+        date_tasks, fields, bond_datasets = [], [], ()
     price_tasks = []
     for day, code in events:
         for offset_a, offset_b in ((-21, -1), (1, 14)):
@@ -168,7 +182,8 @@ def main():
         checks.setdefault(name, [{"status": "HOLD_BOND_ID_UNVERIFIED"}])
 
     # The official tutorial demonstrates multiple intraday times on one date.
-    checks["TaiwanOptionVix"] = [{"status": "EXCLUDED_INTRADAY", "documentation": VIX_TUTORIAL}]
+    if not args.identity_only:
+        checks["TaiwanOptionVix"] = [{"status": "EXCLUDED_INTRADAY", "documentation": VIX_TUTORIAL}]
     conclusions = {}
     for dataset, windows in checks.items():
         states = {item["status"] for item in windows}
@@ -187,6 +202,10 @@ def main():
         "checks": checks,
         "historical_identity": {
             "current_master_matches": len(current),
+            "delisting_feeds": [
+                {"start": task.start, "end": task.end, "status": results[task].status,
+                 "rows": len(results[task].rows)} for task in event_feeds
+            ],
             "delisting_event_windows_tested": len(events),
             "observations": proof_of_delisted_coverage(checked, events),
             "full_effective_identity_history": "HOLD",

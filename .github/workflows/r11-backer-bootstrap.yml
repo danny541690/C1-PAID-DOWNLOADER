@@ -230,7 +230,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   contract-closeout:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-contract-closeout]')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-contract-closeout]') || contains(github.event.head_commit.message, '[r11-identity-followup]'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -238,7 +238,13 @@ jobs:
       - name: Verify remaining data contracts and historical listing evidence
         env:
           FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
-        run: python3 -m scripts.r11_backer.contract_closeout
+          IDENTITY_ONLY: ${{ contains(github.event.head_commit.message, '[r11-identity-followup]') }}
+        run: |
+          if [[ "$IDENTITY_ONLY" == true ]]; then
+            python3 -m scripts.r11_backer.contract_closeout --identity-only
+          else
+            python3 -m scripts.r11_backer.contract_closeout
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
