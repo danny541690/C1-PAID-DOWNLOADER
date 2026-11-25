@@ -254,7 +254,7 @@ jobs:
           retention-days: 30
   release-remediation:
     name: Verify targeted Backer release improvements
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-release-remediation]')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-release-remediation]') || contains(github.event.head_commit.message, '[r11-remediation-followup]'))
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
@@ -267,6 +267,7 @@ jobs:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          R11_REMEDIATION_FOLLOWUP: ${{ contains(github.event.head_commit.message, '[r11-remediation-followup]') }}
         run: python3 -m scripts.r11_backer.release_remediation
       - uses: actions/upload-artifact@v4
         if: always()

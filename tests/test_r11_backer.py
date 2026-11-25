@@ -485,3 +485,29 @@ class ReleaseRemediationTests(unittest.TestCase):
         failed, _ = reconcile_close(Sample("VALID_SAMPLE", rows=raw[:2]), official)
         self.assertEqual(failed["status"], "HOLD_DATED_CLOSE_RECONCILIATION")
         self.assertEqual(failed["markets"]["TWSE"]["missing"], 1)
+
+    def test_direct_fallback_requires_exact_date_identity_and_official_close(self):
+        from decimal import Decimal
+        from scripts.r11_backer.release_probes import Sample, Task
+        from scripts.r11_backer.release_remediation import direct_close_result
+
+        task = Task("TaiwanStockPrice", "2010-11-24", "2010-11-24", "1234")
+        row = {"stock_id": "1234", "date": task.start, "close": 10.3}
+        self.assertEqual(direct_close_result(task, Sample("VALID_SAMPLE", rows=(row,)), Decimal("10.30")),
+                         "PASS_DIRECT_CLOSE")
+        self.assertEqual(direct_close_result(task, Sample("VALID_SAMPLE", rows=(row,)), Decimal("10.31")),
+                         "HOLD_DIRECT_CLOSE_MISMATCH")
+        self.assertEqual(direct_close_result(task, Sample("VALID_SAMPLE", rows=(row | {"stock_id": "1235"},)),
+                                             Decimal("10.30")), "HOLD_DIRECT_IDENTITY_OR_DATE")
+
+    def test_gold_distinguishes_repeated_rows_from_distinct_intraday_observations(self):
+        from scripts.r11_backer.release_probes import Sample
+        from scripts.r11_backer.release_remediation import gold_outcome
+
+        same = {"date": "2026-11-24 09:00:00"}
+        later = {"date": "2026-11-24 09:05:00"}
+        repeated = gold_outcome(Sample("VALID_SAMPLE", rows=(same, same)))
+        self.assertEqual(repeated["status"], "HOLD_DAILY_OBSERVATION_AND_PUBLICATION_CONTRACT")
+        intraday = gold_outcome(Sample("VALID_SAMPLE", rows=(same, same, later)))
+        self.assertEqual(intraday["status"], "EXCLUDE_SUBDAILY_SOURCE_SERIES")
+        self.assertEqual(intraday["most_common_interval_seconds"], 300)
