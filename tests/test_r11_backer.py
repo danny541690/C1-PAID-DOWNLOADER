@@ -703,3 +703,30 @@ class TPExHistoricalEvidenceTests(unittest.TestCase):
         self.assertEqual(supported_session_counts(Decimal("11981.58"), Decimal("44.21")), [271])
         self.assertGreater(len(supported_session_counts(Decimal("27.96"), Decimal("0.10"))), 1)
         self.assertEqual(supported_session_counts(Decimal("0.01"), None), [])
+
+    def test_archive_checks_final_timestamp_and_steps_when_job_status_is_stale(self):
+        from unittest.mock import Mock, patch
+        from scripts.r11_backer.test_archive import ARCHIVE_JOB, attempt_jobs
+
+        published = {"status": "in_progress", "completed_at": "2026-11-25T17:25:29Z", "conclusion": "success",
+                     "steps": [{"status": "completed"}]}
+        pending = published | {"completed_at": None, "conclusion": None}
+        github = Mock()
+        github.pages.side_effect = [[pending], [published, {"name": ARCHIVE_JOB, "status": "in_progress"}]]
+        with patch("scripts.r11_backer.test_archive.time.sleep") as wait:
+            self.assertEqual(attempt_jobs(github, "attempt", current=True), [published])
+        wait.assert_called_once_with(2)
+
+    def test_calendar_resume_only_downloads_missing_sources(self):
+        from unittest.mock import patch
+        from scripts.r11_backer.test_archive import json_bytes
+        from scripts.r11_backer.tpex_calendar import EVIDENCE_RUN, resume_sources
+
+        origins = {"a.json": "https://example.com/a", "b.json": "https://example.com/b"}
+        report = {"official_sources": origins, "source_run": EVIDENCE_RUN,
+                  "official_contract_statuses": {"a.json": "VALID_OFFICIAL_ROWS"}}
+        archive = {"reconciliation.json": json_bytes(report), "official/a.json": b"original"}
+        with patch("scripts.r11_backer.tpex_calendar.earlier_evidence", return_value=archive):
+            self.assertEqual(resume_sources(1234, origins), {"a.json": ("REUSED_VERIFIED_SOURCE", b"original")})
+            with self.assertRaises(ValueError):
+                resume_sources(1234, origins | {"b.json": "https://example.com/other"})

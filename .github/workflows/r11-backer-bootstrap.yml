@@ -452,7 +452,7 @@ jobs:
         run: python3 -m scripts.r11_backer.market_lifetimes --verify-only
   tpex-official-calendar:
     name: Verify TPEx early trading dates and yearbook discrepancy
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-tpex-official-calendar]')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-tpex-official-calendar]') || contains(github.event.head_commit.message, '[r11-tpex-calendar-repair]'))
     runs-on: ubuntu-latest
     timeout-minutes: 6
     outputs:
@@ -471,7 +471,13 @@ jobs:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-        run: '"$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_calendar'
+          R11_RESUME_CALENDAR: ${{ contains(github.event.head_commit.message, '[r11-tpex-calendar-repair]') && '45664576931' || '' }}
+        run: |
+          args=()
+          if [[ -n "$R11_RESUME_CALENDAR" ]]; then
+            args+=(--resume-from "$R11_RESUME_CALENDAR")
+          fi
+          "$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_calendar "${args[@]}"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

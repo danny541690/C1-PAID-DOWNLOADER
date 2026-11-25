@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import csv
 from functools import partial
 import hashlib
+from http.client import IncompleteRead
 from io import BytesIO, StringIO
 import json
 import os
@@ -67,7 +68,7 @@ class GitHub:
                         raise ArchiveError("GITHUB_RATE_LIMITED") from None
                     time.sleep(int(delay))
                     continue
-            except (URLError, TimeoutError):
+            except (URLError, TimeoutError, IncompleteRead):
                 if retry == 2:
                     raise ArchiveError("GITHUB_NETWORK_ERROR") from None
             time.sleep(2 ** retry)
@@ -170,6 +171,29 @@ def job_logs(github, jobs, files, missing, folder):
             missing.append({"job_id": job_id, "status": str(error)})
 
 
+def completed_test_job(job):
+    if not job.get("conclusion"):
+        return False
+    if job.get("status") == "completed":
+        return True
+    # The jobs endpoint can retain an in-progress status after publishing the final result and timestamp.
+    steps = job.get("steps") or []
+    return bool(job.get("completed_at") and steps and all(step.get("status") == "completed" for step in steps))
+
+
+def attempt_jobs(github, endpoint, *, current):
+    for delay in (0, 2, 4, 8):
+        if delay:
+            time.sleep(delay)
+        jobs = list(github.pages(f"{endpoint}/jobs", "jobs"))
+        if not current:
+            return jobs
+        test_jobs = [job for job in jobs if job.get("name") != ARCHIVE_JOB]
+        if test_jobs and all(map(completed_test_job, test_jobs)):
+            return test_jobs
+    raise ArchiveError("TEST_JOBS_NOT_FINAL")
+
+
 def run_snapshot(github, run, *, current=False, attempts=None):
     run_id = run["id"]
     attempts = list(attempts or range(1, run["run_attempt"] + 1))
@@ -180,10 +204,7 @@ def run_snapshot(github, run, *, current=False, attempts=None):
         endpoint = f"/actions/runs/{run_id}/attempts/{number}"
         folder = f"attempt-{number}"
         attempt = github.json(endpoint)
-        jobs = list(github.pages(f"{endpoint}/jobs", "jobs"))
-        test_jobs = [job for job in jobs if not current or job.get("name") != ARCHIVE_JOB]
-        if current and any(job.get("status") != "completed" for job in test_jobs):
-            raise ArchiveError("TEST_JOBS_NOT_FINAL")
+        test_jobs = attempt_jobs(github, endpoint, current=current)
         outcomes.update(job.get("conclusion") for job in test_jobs)
         files[f"{folder}/attempt.json"] = json_bytes(attempt)
         files[f"{folder}/jobs.json"] = json_bytes(test_jobs)

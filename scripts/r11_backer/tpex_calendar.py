@@ -11,6 +11,7 @@ from html import unescape
 import json
 import os
 import re
+import time
 from urllib.parse import urlencode
 
 from .drive_pilot import token as drive_token
@@ -27,6 +28,7 @@ from .tpex_history import (
 SOURCE_ROOT = "https://www.tpex.org.tw/www/zh-tw/afterTrading"
 ANNUAL_SOURCE = "https://www.tpex.org.tw/epaper/monthly/nweb/GTSM112/Statistics-a-1.htm"
 ANNUAL_MEMBER = "tpex-annual-turnover.html"
+RETRYABLE = {"HOLD_OFFICIAL_NETWORK", *(f"HOLD_OFFICIAL_HTTP_{code}" for code in (408, 500, 502, 503, 504, 520))}
 ANCHORS = ("5301", "5302")  # TPEx's issuer snapshot dates both listings before the 1994 quote archive.
 YEARBOOK_TYPO = date(1999, 5, 30)
 CANONICAL_SESSION = date(1999, 5, 31)
@@ -209,16 +211,35 @@ def reconcile(archived, sources, responses):
     return public, evidence
 
 
-def run():
+def fetch_official(url):
+    for delay in (0, 2, 4):
+        if delay:
+            time.sleep(delay)
+        status, body = source_bytes(url)
+        if status not in RETRYABLE:
+            return status, body
+    return status, body
+
+
+def resume_sources(run_id, origins):
+    archived = earlier_evidence(run_id)
+    summary = json.loads(archived["reconciliation.json"])
+    if summary["official_sources"] != origins or summary["source_run"] != EVIDENCE_RUN:
+        raise ValueError("previous calendar archive belongs to a different source plan")
+    return {name: ("REUSED_VERIFIED_SOURCE", archived[f"official/{name}"]) for name, status in
+            summary["official_contract_statuses"].items() if status in {"VALID_OFFICIAL_ROWS", "EMPTY_OFFICIAL_REPORT"}}
+
+
+def run(resume_from):
     archived = earlier_evidence()
     plan = source_plan()
     origins = {source.name: source.url for source in plan} | {ANNUAL_MEMBER: ANNUAL_SOURCE}
-    names = list(origins)
-    fetched = {}
+    fetched = resume_sources(resume_from, origins) if resume_from else {}
+    names = [name for name in origins if name not in fetched]
     with ThreadPoolExecutor(max_workers=6) as pool:
         for offset in range(0, len(names), 6):
             batch = names[offset:offset + 6]
-            results = list(pool.map(source_bytes, [origins[name] for name in batch]))
+            results = list(pool.map(fetch_official, [origins[name] for name in batch]))
             fetched.update(zip(batch, results))
             if any(status == "HOLD_OFFICIAL_HTTP_429" for status, _ in results):
                 break
@@ -227,7 +248,7 @@ def run():
                        "finmind_requests": 0, "source_run": EVIDENCE_RUN,
                        "source_fetch_outcomes": dict(Counter(status for status, _ in fetched.values())),
                        "source_contract_outcomes": dict(Counter(evidence["official_contract_statuses"].values())),
-                       "requests_skipped": len(names) - len(fetched)}
+                       "requests_skipped": len(origins) - len(fetched), "reused_calendar_run": resume_from}
     save_private(fetched, origins, {}, report | evidence)
     return report
 
@@ -248,13 +269,15 @@ def verify():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--verify-only", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--verify-only", action="store_true")
+    mode.add_argument("--resume-from", type=int)
     args = parser.parse_args()
     try:
         if args.verify_only:
             verify()
             return 0
-        report = run()
+        report = run(args.resume_from)
     except Exception as error:
         report = {"status": "HOLD_INFRASTRUCTURE", "failure_class": type(error).__name__, "production": "HOLD"}
         if args.verify_only:
