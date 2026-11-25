@@ -8,15 +8,22 @@ from urllib.parse import urlencode
 from .live_preflight import read_json
 
 PROBES = (
-    ("TaiwanStockPrice", "2026-11-02", "2026-11-10", {"stock_id", "open", "close", "Trading_Volume"}),
-    ("TaiwanStockHoldingSharesPer", "2026-11-02", "2026-11-14",
-     {"stock_id", "HoldingSharesLevel", "people", "percent", "unit"}),
-    ("TaiwanStockMonthRevenue", "2026-10-01", "2026-10-31",
-     {"stock_id", "revenue", "revenue_month", "revenue_year"}),
+    ("TaiwanStockPrice", "2330", "stock_id", "2026-11-02", "2026-11-10",
+     {"open", "close", "Trading_Volume"}),
+    ("TaiwanStockHoldingSharesPer", "2330", "stock_id", "2026-11-02", "2026-11-14",
+     {"HoldingSharesLevel", "people", "percent", "unit"}),
+    ("TaiwanStockMonthRevenue", "2330", "stock_id", "2026-10-01", "2026-10-31",
+     {"revenue", "revenue_month", "revenue_year"}),
+    ("TaiwanStockInstitutionalInvestorsBuySell", "2330", "stock_id", "2026-11-02", "2026-11-06",
+     {"buy", "sell", "name"}),
+    ("TaiwanStockDividendResult", "2330", "stock_id", "2025-06-01", "2025-06-30",
+     {"before_price", "after_price", "reference_price"}),
+    ("TaiwanFuturesDaily", "TX", "futures_id", "2026-11-02", "2026-11-04",
+     {"contract_date", "close", "volume", "open_interest"}),
 )
 
 
-def classify(payload, start, end, fields):
+def classify(payload, start, end, fields, *, identity_field="stock_id", identity="2330"):
     if not isinstance(payload, dict):
         return "INVALID_RESPONSE"
     if payload.get("status") in (401, 403):
@@ -31,7 +38,7 @@ def classify(payload, start, end, fields):
     if not rows:
         return "EMPTY_WINDOW"
     for row in rows:
-        if not isinstance(row, dict) or not fields <= row.keys() or row["stock_id"] != "2330":
+        if not isinstance(row, dict) or not fields <= row.keys() or row.get(identity_field) != identity:
             return "SCHEMA_UNVERIFIED"
         try:
             observed = date.fromisoformat(row["date"])
@@ -42,8 +49,8 @@ def classify(payload, start, end, fields):
     return "VALID_SAMPLE"
 
 
-def probe(dataset, start, end, fields, token):
-    params = urlencode({"dataset": dataset, "data_id": "2330", "start_date": start, "end_date": end})
+def probe(dataset, identity, identity_field, start, end, fields, token):
+    params = urlencode({"dataset": dataset, "data_id": identity, "start_date": start, "end_date": end})
     try:
         payload = read_json(f"https://api.finmindtrade.com/api/v4/data?{params}", token)
     except HTTPError as error:
@@ -52,7 +59,7 @@ def probe(dataset, start, end, fields, token):
         )
     except Exception:
         return "CHECK_FAILED"
-    return classify(payload, start, end, fields)
+    return classify(payload, start, end, fields, identity_field=identity_field, identity=identity)
 
 
 def main():

@@ -194,3 +194,18 @@ class DatasetPilotTests(unittest.TestCase):
             status({"status": 200, "data": [row | {"date": "2026-11-05"}]}),
             "DATE_OUTSIDE_WINDOW",
         )
+
+    def test_futures_identity_uses_futures_id(self):
+        from scripts.r11_backer.dataset_pilot import classify
+
+        row = {"futures_id": "TX", "close": 1, "date": "2026-11-03"}
+        args = ("2026-11-02", "2026-11-04", {"close"})
+        self.assertEqual(
+            classify({"status": 200, "data": [row]}, *args, identity_field="futures_id", identity="TX"),
+            "VALID_SAMPLE",
+        )
+        self.assertEqual(
+            classify({"status": 200, "data": [row | {"futures_id": "MTX"}]}, *args,
+                     identity_field="futures_id", identity="TX"),
+            "SCHEMA_UNVERIFIED",
+        )
