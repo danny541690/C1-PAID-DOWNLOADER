@@ -1,0 +1,15 @@
+name: Codex paid downloader smoke test
+on:
+  push:
+    branches:
+      - codex/paid-downloader-smoke-20261125
+permissions:
+  contents: read
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check SQLite write, read, and result
+        run: python3 scripts/codex_smoke_test.py
