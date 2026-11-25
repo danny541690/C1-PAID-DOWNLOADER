@@ -320,17 +320,33 @@ jobs:
         run: python3 -m scripts.r11_backer.history_pilot --verify-only
   history-followup:
     name: Reconcile the early TWSE calendar and monthly revenue
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-history-followup]')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-history-followup]') || contains(github.event.head_commit.message, '[r11-calendar-retry]'))
+    permissions:
+      actions: read
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v4
+        if: contains(github.event.head_commit.message, '[r11-calendar-retry]')
+        with:
+          name: r11-history-followup-1
+          path: r11-prior-calendar
+          run-id: 45651767533
+          github-token: ${{ github.token }}
       - name: Compare official historical sessions and fix period-based revenue retrieval
+        if: contains(github.event.head_commit.message, '[r11-history-followup]')
         env:
           FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
         run: python3 -m scripts.r11_backer.history_pilot --followup
+      - name: Reuse the verified index and retry only missing TWSE months
+        if: contains(github.event.head_commit.message, '[r11-calendar-retry]')
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 -m scripts.r11_backer.history_pilot --retry-calendar r11-prior-calendar/r11-twse-early-session-index.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

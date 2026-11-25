@@ -42,7 +42,7 @@ def query(d):
   with urllib.request.urlopen(req,timeout=75) as r:status=r.status;raw=r.read(20000001)
   if len(raw)>20000000:return p,{"state":"RESPONSE_SIZE_LIMIT","http_status":status}
   obj=json.loads(raw.decode("utf-8-sig"))
-  if obj.get("status")!=200:return p,{"state":"API_REJECTED","http_status":status,"api_status":obj.get("status"),"message":str(obj.get("msg") or obj.get("message") or "")[:300]}
+  if obj.get("status")!=200:return p,{"state":"API_REJECTED","http_status":status,"api_status":obj.get("status") if type(obj.get("status")) is int else None}
   data=obj.get("data")
   if not isinstance(data,list):return p,{"state":"INVALID_RESPONSE_SHAPE","http_status":status}
   if not data:return p,{"state":"EMPTY","http_status":status,"rows":0,"columns":[]}
@@ -51,13 +51,13 @@ def query(d):
   dates=sorted({str(x.get("date") or x.get("trade_date") or x.get("datetime") or "")[:10] for x in data if x.get("date") or x.get("trade_date") or x.get("datetime")})
   first=dates[0] if dates else None
   sha=hashlib.sha256(json.dumps(data,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest()
-  exact=not d["single_day"] and bool(first)
+  has_range_observation=not d["single_day"] and bool(first)
   return p,{"state":"PASS","http_status":status,"rows":len(data),"columns":cols,"first_observed_date":first,
    "last_observed_date":dates[-1] if dates else None,"unique_dates":len(dates),
-   "date_basis":"API_RANGE_MIN_OBSERVED" if exact else ("SINGLE_DAY_PROBE_ONLY" if d["single_day"] else "NO_DATE_FIELD"),
-   "earliest_date_certified":exact,"response_sha256":sha,"sample":data[0]}
- except urllib.error.HTTPError as e:return p,{"state":"HTTP_ERROR","http_status":e.code,"message":e.read(1500).decode("utf-8","replace")[:500]}
- except Exception as e:return p,{"state":"TRANSPORT_OR_PARSE_ERROR","error":type(e).__name__+":"+str(e)[:250]}
+   "date_basis":"API_RANGE_MIN_OBSERVED" if has_range_observation else ("SINGLE_DAY_PROBE_ONLY" if d["single_day"] else "NO_DATE_FIELD"),
+   "earliest_date_certified":False,"response_sha256":sha}
+ except urllib.error.HTTPError as e:return p,{"state":"HTTP_ERROR","http_status":e.code}
+ except Exception as e:return p,{"state":"TRANSPORT_OR_PARSE_ERROR","error":type(e).__name__}
 def main():
  md=read_doc();registry=parse_registry(md);rows=[]
  for i,d in enumerate(registry,1):

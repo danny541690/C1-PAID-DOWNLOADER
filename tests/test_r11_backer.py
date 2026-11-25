@@ -569,3 +569,16 @@ class HistoricalCapacityPilotTests(unittest.TestCase):
             parse_twse_sessions(official, date(1994, 10, 1))
         with self.assertRaises(ValueError):
             parse_twse_sessions(official | {"data": official["data"] * 2}, month)
+
+    def test_partial_exchange_artifact_cannot_silently_change_scope(self):
+        from unittest.mock import patch
+        from scripts.r11_backer.history_pilot import canonical_json, sha, verified_exchange_months
+
+        start, end = date(1994, 9, 1), date(1994, 10, 1)
+        prior = {"venue": "TWSE", "start_month": "1994-09-01", "end_month": "1994-10-01",
+                 "newest_first_sessions": ["1994-09-13"]}
+        with patch("scripts.r11_backer.history_pilot.PREVIOUS_INDEX_SHA256", sha(canonical_json(prior))):
+            self.assertEqual(verified_exchange_months(prior, start, end), {start: ("PASS", {date(1994, 9, 13)})})
+            changed = prior | {"newest_first_sessions": ["1994-09-14"]}
+            with self.assertRaises(ValueError):
+                verified_exchange_months(changed, start, end)
