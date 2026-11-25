@@ -23,6 +23,8 @@ jobs:
         run: python3 -m scripts.r11_backer.preflight --catalog-only
       - name: Run synthetic archive and preflight tests
         run: python3 -m unittest discover -s tests -p test_r11_backer.py -v
+      - name: Validate incremental probe plan without credentials
+        run: python3 -m scripts.r11_backer.dataset_pilot --plan
   public-catalog:
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -98,6 +100,7 @@ jobs:
           set -euo pipefail
           branch="codex/r11-cas-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           api="repos/$GITHUB_REPOSITORY/contents/.jarvis-test/r11-synthetic.json"
+          count=$(python3 -m scripts.r11_backer.dataset_pilot --count)
           now=$(date +%s)
           snapshot=$(gh api "$api?ref=$branch" --jq '.content | @base64d')
           if jq -e '.remaining == 1' <<< "$snapshot" >/dev/null; then
@@ -108,11 +111,11 @@ jobs:
 
           state = json.loads(sys.argv[2])
           if not can_reserve(state["events"], int(sys.argv[1]), "probe",
-                             total_limit=6, paused_until=state["paused_until"]):
+                             total_limit=8, paused_until=state["paused_until"]):
               raise SystemExit("pilot rolling quota unavailable")
           PYCODE
           fi
-          payload=$(jq -nc --arg worker "$WORKER" --argjson now "$now"             '{remaining:0,owner:$worker,events:[range(6) | [$now,"probe"]],paused_until:0}' | base64 -w0)
+          payload=$(jq -nc --arg worker "$WORKER" --argjson now "$now" --argjson count "$count"             '{remaining:0,owner:$worker,events:[range($count) | [$now,"probe"]],paused_until:0}' | base64 -w0)
           if gh api --method PUT "$api" -f branch="$branch" -f sha="$SEED" -f content="$payload" -f message='Claim synthetic quota' >"$RUNNER_TEMP/claim" 2>"$RUNNER_TEMP/claim-error"; then
             result=GRANTED
           else
@@ -120,7 +123,7 @@ jobs:
             result=STALE_REJECTED
           fi
           state=$(gh api "$api?ref=$branch" --jq '.content | @base64d | fromjson')
-          jq -e '.remaining == 0 and (.events | length == 6) and .events[0][1] == "probe" and (.owner == "alpha" or .owner == "beta" or .owner == "gamma")' <<< "$state" >/dev/null
+          jq -e --argjson count "$count" '.remaining == 0 and (.events | length == $count) and all(.events[]; .[1] == "probe") and (.owner == "alpha" or .owner == "beta" or .owner == "gamma")' <<< "$state" >/dev/null
           if [[ "$result" == GRANTED ]]; then
             jq -e --arg worker "$WORKER" '.owner == $worker' <<< "$state" >/dev/null
           else
@@ -128,7 +131,7 @@ jobs:
           fi
           printf 'synthetic_claim=%s\n' "$result"
           printf 'result=%s\n' "$result" >> "$GITHUB_OUTPUT"
-      - name: Probe six datasets under one reserved Backer batch
+      - name: Probe uncovered windows under one reserved Backer batch
         if: steps.claim.outputs.result == 'GRANTED'
         env:
           FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}

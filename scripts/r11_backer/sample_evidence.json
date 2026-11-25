@@ -1,0 +1,38 @@
+{
+  "7bdc2b05d5d454e4680c4a5858db0690683eb0d8fa5bd528cb1ee4664b00f094": {
+    "dataset": "TaiwanStockPrice",
+    "status": "VALID_SAMPLE",
+    "run_id": 45591435355,
+    "job_id": 139126503961
+  },
+  "e1ed14e6dbb7501f6e58a115ce14942dfebb07c74707db7a0cd67bdfa40b3114": {
+    "dataset": "TaiwanStockHoldingSharesPer",
+    "status": "VALID_SAMPLE",
+    "run_id": 45591435355,
+    "job_id": 139126503961
+  },
+  "54f710aa92ce31cafedfa2963579a4b479ce300dadb9f2a37d1e10d45763f2cb": {
+    "dataset": "TaiwanStockMonthRevenue",
+    "status": "VALID_SAMPLE",
+    "run_id": 45591435355,
+    "job_id": 139126503961
+  },
+  "2fcfa55122e62b2344b5b7927e0f60dae98e8b6ca4c4f9c46f03efbeb51d3c93": {
+    "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+    "status": "VALID_SAMPLE",
+    "run_id": 45591435355,
+    "job_id": 139126503961
+  },
+  "be1bee7b19c259ae5d3bcbeaa77e30820beacc75be22f15297ba5cd1f26ae004": {
+    "dataset": "TaiwanStockDividendResult",
+    "status": "VALID_SAMPLE",
+    "run_id": 45591435355,
+    "job_id": 139126503961
+  },
+  "3b3bda9ce4cc5e612c26802f7581e6b72186aa61066fef447f0ee9ce8235f908": {
+    "dataset": "TaiwanFuturesDaily",
+    "status": "VALID_SAMPLE",
+    "run_id": 45591435355,
+    "job_id": 139126503961
+  }
+}

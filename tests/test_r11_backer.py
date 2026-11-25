@@ -209,3 +209,12 @@ class DatasetPilotTests(unittest.TestCase):
                      identity_field="futures_id", identity="TX"),
             "SCHEMA_UNVERIFIED",
         )
+
+    def test_exact_window_evidence_is_reused_but_changed_contract_is_pending(self):
+        from scripts.r11_backer.dataset_pilot import PROBES, probe_key, split_probes
+
+        spec = PROBES[0]
+        changed = (*spec[:-1], spec[-1] | {"new_field"})
+        record = {"dataset": spec[0], "status": "VALID_SAMPLE", "run_id": 1, "job_id": 2}
+        self.assertEqual(split_probes([spec, changed], {probe_key(spec): record}), ([spec], [changed]))
+        self.assertEqual(split_probes([spec], {probe_key(spec): record | {"job_id": None}}), ([], [spec]))
