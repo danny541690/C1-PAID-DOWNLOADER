@@ -63,3 +63,49 @@ class BackerBootstrapTests(unittest.TestCase):
             validate_month_sample({"status": 200, "data": []}, start, end),
             "EMPTY_WINDOW",
         )
+
+
+class DispatchTests(unittest.TestCase):
+    def setUp(self):
+        from scripts.r11_backer.dispatch import Window
+
+        self.latest = date(2026, 11, 25)
+        self.recent = Window("Synthetic", "ALL", self.latest, self.latest, "v1", "B01")
+        early = date(1982, 1, 1)
+        self.early = Window("Synthetic", "ALL", early, early, "v1", "B01")
+
+    def test_assignments_sort_newest_first_and_deduplicate(self):
+        from scripts.r11_backer.dispatch import assignments
+
+        plan = assignments(
+            [self.early, self.recent, self.early], {"Synthetic": self.latest}
+        )
+        self.assertEqual(plan, [self.recent, self.early])
+
+    def test_unpublished_window_does_not_dispatch(self):
+        from scripts.r11_backer.dispatch import assignments
+
+        with self.assertRaises(ValueError):
+            assignments([self.recent], {"Synthetic": self.early.end})
+
+    def test_expired_claim_recovery_and_completed_task_survive_restart(self):
+        from contextlib import closing
+        from scripts.r11_backer.dispatch import LocalLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dispatch.db"
+            with closing(LocalLedger(path)) as first, closing(LocalLedger(path)) as second:
+                first.seed([self.early, self.recent])
+                old = first.claim("B01", 100, 10)
+                self.assertEqual(old, (self.recent.task_id, 1))
+                self.assertEqual(second.claim("B01", 101, 30), (self.early.task_id, 1))
+                self.assertIsNone(second.claim("B01", 109, 30))
+                recovered = second.claim("B01", 110, 30)
+                self.assertEqual(recovered, (self.recent.task_id, 2))
+                self.assertFalse(first.accept(*old, 111, "old"))
+                self.assertTrue(second.accept(*recovered, 111, "verified"))
+                self.assertFalse(second.accept(*recovered, 111, "verified"))
+            with closing(LocalLedger(path)) as restarted:
+                restarted.seed([self.early, self.recent])
+                self.assertEqual(restarted.claim("B01", 150, 30), (self.early.task_id, 2))
+                self.assertIsNone(restarted.claim("B01", 150, 30))
