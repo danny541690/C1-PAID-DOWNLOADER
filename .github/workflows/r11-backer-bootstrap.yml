@@ -538,3 +538,69 @@ jobs:
             printf -- '- Production release: HOLD (outside this pilot)\n'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           test "$verdict" = PASS
+  backfill-test-history:
+    name: Backfill historical Backer evidence to private Drive
+    if: github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-archive-backfill]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Save prior attempts, jobs, logs, reports and original-file references
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.test_archive --backfill
+  archive-test-run:
+    name: Save Backer test history to private Drive
+    if: >-
+      always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight') ||
+       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.head.ref == 'codex/r11-1-backer-preflight'))
+    needs:
+      - synthetic-checks
+      - public-catalog
+      - live-read-only-preflight
+      - remote-seed
+      - remote-claim
+      - drive-round-trip
+      - release-sweep
+      - gap-diagnostics
+      - market-scope
+      - contract-closeout
+      - release-remediation
+      - history-capacity
+      - history-readback
+      - history-followup
+      - manifest-preview
+      - manifest-readback
+      - integration-b00
+      - integration-workers
+      - integration-b09
+      - integration-b10
+      - paid-archive-readback
+      - pilot-verdict
+      - backfill-test-history
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive all completed test jobs and verify the Drive readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.test_archive
