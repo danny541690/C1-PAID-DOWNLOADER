@@ -582,3 +582,36 @@ class HistoricalCapacityPilotTests(unittest.TestCase):
             changed = prior | {"newest_first_sessions": ["1994-09-14"]}
             with self.assertRaises(ValueError):
                 verified_exchange_months(changed, start, end)
+
+
+class TPExHistoricalEvidenceTests(unittest.TestCase):
+    def test_transfer_window_requires_exclusive_membership_and_matching_prices(self):
+        from decimal import Decimal
+        from scripts.r11_backer.release_probes import Sample
+        from scripts.r11_backer.tpex_history import transfer_proof
+
+        before, switch = date(2024, 1, 24), date(2024, 1, 25)
+        good = "VALID_OFFICIAL_DAY"
+        quotes = {("TPEx", before): (good, {"6446": Decimal("1.5")}, {}), ("TWSE", before): (good, {}, {}),
+                  ("TPEx", switch): (good, {}, {}), ("TWSE", switch): (good, {"6446": Decimal("2.5")}, {})}
+        provider = Sample("VALID_SAMPLE", rows=({"date": str(before), "stock_id": "6446", "close": 1.5},
+                                                 {"date": str(switch), "stock_id": "6446", "close": 2.5}))
+        verdict, result = transfer_proof("6446", switch, quotes, provider)
+        self.assertEqual(verdict, "PASS_TRANSFER_PRICE_AND_VENUE_SAMPLE")
+        self.assertEqual(result[0]["end_exclusive"], str(switch))
+        self.assertEqual(result[1]["start"], str(switch))
+        quotes["TPEx", switch] = (good, {"6446": Decimal("2.5")}, {})
+        self.assertEqual(transfer_proof("6446", switch, quotes, provider)[0], "HOLD_TRANSFER_MARKET_MEMBERSHIP")
+
+    def test_official_endpoint_empty_and_delisting_year_remain_distinct(self):
+        import json
+        from scripts.r11_backer.tpex_history import close_rows, termination_rows
+
+        empty = json.dumps({"stat": "ok", "date": "19961121", "tables": [{"data": []}]})
+        self.assertEqual(close_rows(empty, date(1996, 11, 21), "TPEx"), ("EMPTY_OFFICIAL_ENDPOINT", {}, {}))
+        termination = {"stat": "ok", "date": "2024", "tables": [
+            {"fields": ["股票代號", "終止上櫃日期", "終止上櫃原因"], "data": [["6446", "113-01-25", "example"]]},
+        ]}
+        self.assertEqual(termination_rows(json.dumps(termination), 2024)[0]["end"], "2024-01-25")
+        with self.assertRaises(ValueError):
+            termination_rows(json.dumps(termination), 2023)

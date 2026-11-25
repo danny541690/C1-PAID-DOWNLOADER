@@ -356,6 +356,52 @@ jobs:
             r11-twse-early-session-index.json
           if-no-files-found: error
           retention-days: 30
+  tpex-market-history:
+    name: Reconcile TPEx sessions and effective market identity
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-tpex-history]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official yearbook reader
+        run: |
+          python3 -m venv "$RUNNER_TEMP/r11-tpex"
+          "$RUNNER_TEMP/r11-tpex/bin/python" -m pip install --disable-pip-version-check --no-deps xlrd==2.0.1
+      - name: Compare official daily evidence with Backer and stage original sources privately
+        id: reconcile
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: '"$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_history'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-tpex-history-${{ github.run_attempt }}
+          path: r11-tpex-history.json
+          if-no-files-found: error
+          retention-days: 30
+  tpex-market-readback:
+    name: Independently verify private TPEx source evidence
+    needs: [tpex-market-history, synthetic-checks]
+    if: needs.tpex-market-history.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compare official and Backer archive files against their recorded digests
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.tpex_history --verify-only
   manifest-preview:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
     runs-on: ubuntu-latest
@@ -579,6 +625,8 @@ jobs:
       - history-capacity
       - history-readback
       - history-followup
+      - tpex-market-history
+      - tpex-market-readback
       - manifest-preview
       - manifest-readback
       - integration-b00
