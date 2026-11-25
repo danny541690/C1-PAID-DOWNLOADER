@@ -420,8 +420,8 @@ class ManifestReadinessTests(unittest.TestCase):
 
         rows = sample_data()
         self.assertEqual(len(rows), 89)
-        self.assertEqual(sum(row["state"] == "SAMPLE_ONLY" for row in rows), 63)
-        self.assertEqual(sum(row["state"] == "HOLD_CONTRACT" for row in rows), 7)
+        self.assertEqual(sum(row["state"] == "SAMPLE_ONLY" for row in rows), 69)
+        self.assertEqual(next(row["state"] for row in rows if row["dataset"] == "GoldPrice"), "EXCLUDED_SUBDAILY")
         self.assertTrue(all(row["state"] != "PRODUCTION_APPROVED" for row in rows))
 
 

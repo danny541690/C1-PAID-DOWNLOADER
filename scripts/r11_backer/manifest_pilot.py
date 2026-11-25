@@ -134,14 +134,15 @@ def plan():
     manifest_sha = hashlib.sha256(json.dumps(task_rows, sort_keys=True).encode()).hexdigest()
     return {
         "readiness": counts, "contract_holds": pending,
+        "remediation_runs": {"native_layouts_and_capacity": 45649612210, "dated_scope_and_granularity": 45649993338},
         "sample_evidence_is_not_approval": True, "production_dispatchable": 0,
         "production": "HOLD",
         "blockers": {
-            "contracts": "Resolve seven mismatches or keep their candidates on HOLD",
+            "contracts": "Approve per-era contracts and publication rules for manifest release",
             "scope": "Resolve twelve scope reviews and obtain effective market identities before bulk ingestion",
-            "coverage": "Approve historical bounds, latest published periods and immutable manifests for released datasets",
+            "coverage": "Approve historical bounds and immutable manifests; retain the unresolved historical TPEx coverage gap",
             "dispatch": "Deploy B00–B10, production state, remote lease/cooldown and G0–G5",
-            "capacity": "Confirm full storage projection and exact Backer expiry",
+            "capacity": "Compare the full storage projection against verified Drive headroom and confirm exact Backer expiry",
         },
         "fixture": {
             "lanes": 8, "oldest": min(w.start for w in expanded).isoformat(),

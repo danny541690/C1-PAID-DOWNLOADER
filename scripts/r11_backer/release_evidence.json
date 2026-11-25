@@ -16,8 +16,8 @@
     "status": "HOLD_SCOPE_REVIEW"
   },
   "GoldPrice": {
-    "run": 45626725236,
-    "status": "HOLD_CONTRACT"
+    "run": 45649993338,
+    "status": "EXCLUDED_SUBDAILY"
   },
   "GovernmentBondsYield": {
     "run": 45597304811,
@@ -48,8 +48,8 @@
     "status": "VALID_SAMPLE"
   },
   "TaiwanDailyShortSaleBalances": {
-    "run": 45626725236,
-    "status": "HOLD_CONTRACT"
+    "run": 45649612210,
+    "status": "VALID_SAMPLE"
   },
   "TaiwanExchangeRate": {
     "run": 45597304811,
@@ -72,8 +72,8 @@
     "status": "VALID_SAMPLE"
   },
   "TaiwanFuturesInstitutionalInvestors": {
-    "run": 45626725236,
-    "status": "HOLD_CONTRACT"
+    "run": 45649612210,
+    "status": "VALID_SAMPLE"
   },
   "TaiwanFuturesInstitutionalInvestorsAfterHours": {
     "run": 45597304811,
@@ -104,8 +104,8 @@
     "status": "VALID_SAMPLE"
   },
   "TaiwanOptionInstitutionalInvestors": {
-    "run": 45626725236,
-    "status": "HOLD_CONTRACT"
+    "run": 45649612210,
+    "status": "VALID_SAMPLE"
   },
   "TaiwanOptionInstitutionalInvestorsAfterHours": {
     "run": 45597304811,
@@ -152,8 +152,8 @@
     "status": "VALID_SAMPLE"
   },
   "TaiwanStockConvertibleBondDaily": {
-    "run": 45626725236,
-    "status": "HOLD_CONTRACT"
+    "run": 45649612210,
+    "status": "VALID_SAMPLE"
   },
   "TaiwanStockConvertibleBondDailyOverview": {
     "run": 45597304811,
@@ -164,8 +164,8 @@
     "status": "VALID_SAMPLE"
   },
   "TaiwanStockConvertibleBondInstitutionalInvestors": {
-    "run": 45626725236,
-    "status": "HOLD_CONTRACT"
+    "run": 45649612210,
+    "status": "VALID_SAMPLE"
   },
   "TaiwanStockConvertibleBondMonthlyAnalysis": {
     "run": 45623673196,
@@ -280,8 +280,8 @@
     "status": "VALID_SAMPLE"
   },
   "TaiwanStockPriceLimit": {
-    "run": 45626725236,
-    "status": "HOLD_CONTRACT"
+    "run": 45649612210,
+    "status": "VALID_SAMPLE"
   },
   "TaiwanStockPriceTick": {
     "run": 45597304811,
