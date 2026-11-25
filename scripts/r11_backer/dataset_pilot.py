@@ -1,6 +1,7 @@
 """Bounded dataset probes using the Backer credential without logging records."""
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date
 import hashlib
 import json
@@ -28,6 +29,26 @@ PROBES = (
      {"cash_buy", "cash_sell", "spot_buy", "spot_sell"}),
     ("TaiwanStockBalanceSheet", "2330", "stock_id", "2025-12-31", "2025-12-31",
      {"type", "value", "origin_name"}),
+    ("TaiwanStockPriceAdj", "2330", "stock_id", "2026-11-02", "2026-11-04",
+     {"Trading_Volume", "close", "open"}),
+    ("TaiwanStockPER", "2330", "stock_id", "2026-11-02", "2026-11-04",
+     {"PBR", "PER", "dividend_yield"}),
+    ("TaiwanStockDayTrading", "2330", "stock_id", "2026-11-02", "2026-11-04",
+     {"BuyAfterSale", "Volume"}),
+    ("TaiwanStockMarginPurchaseShortSale", "2330", "stock_id", "2026-11-02", "2026-11-04",
+     {"MarginPurchaseTodayBalance", "ShortSaleTodayBalance"}),
+    ("TaiwanStockShareholding", "2330", "stock_id", "2026-11-02", "2026-11-04",
+     {"ForeignInvestmentShares", "ForeignInvestmentSharesRatio"}),
+    ("TaiwanStockSecuritiesLending", "2330", "stock_id", "2026-11-02", "2026-11-04",
+     {"transaction_type", "volume"}),
+    ("TaiwanStockFinancialStatements", "2330", "stock_id", "2025-12-31", "2025-12-31",
+     {"origin_name", "type", "value"}),
+    ("TaiwanStockCashFlowsStatement", "2330", "stock_id", "2025-12-31", "2025-12-31",
+     {"origin_name", "type", "value"}),
+    ("TaiwanStockMarketValue", "2330", "stock_id", "2026-11-02", "2026-11-04",
+     {"market_value"}),
+    ("TaiwanStockDividend", "2330", "stock_id", "2025-01-01", "2025-12-31",
+     {"CashEarningsDistribution", "year"}),
 )
 
 
@@ -90,6 +111,30 @@ def split_probes(specs, evidence):
     return reused, pending
 
 
+def run_pending(pending, token, workers=6):
+    """Keep the worker pool full until a provider limit stops new submissions."""
+    remaining = iter(pending)
+    completed = {}
+    rate_limited = False
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        active = {pool.submit(probe, *spec, token): spec for spec in pending[:workers]}
+        for _ in active:
+            next(remaining)
+        while active:
+            done, _ = wait(active, return_when=FIRST_COMPLETED)
+            for future in done:
+                spec = active.pop(future)
+                status = future.result()
+                completed[probe_key(spec)] = status
+                rate_limited |= status == "RATE_LIMITED"
+            if not rate_limited:
+                for _ in done:
+                    spec = next(remaining, None)
+                    if spec is not None:
+                        active[pool.submit(probe, *spec, token)] = spec
+    return completed
+
+
 def main():
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group()
@@ -114,14 +159,14 @@ def main():
     if not token:
         print("dataset_pilot=HOLD_MISSING_BACKER_TOKEN")
         return 1
-    results = []
+    results = run_pending(pending, token)
     for spec in pending:
-        status = probe(*spec, token)
+        status = results.get(probe_key(spec), "NOT_SENT_RATE_LIMIT")
         print(f"{spec[0]}={status}")
-        results.append(status)
-        if status in {"RATE_LIMITED", "ACCESS_DENIED"}:
-            break
-    passed = results == ["VALID_SAMPLE"] * len(pending)
+    print(f"dataset_requests_sent={len(results)}")
+    passed = len(results) == len(pending) and all(
+        status == "VALID_SAMPLE" for status in results.values()
+    )
     print("dataset_pilot=" + ("PASS" if passed else "HOLD"))
     return int(not passed)
 

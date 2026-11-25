@@ -218,3 +218,12 @@ class DatasetPilotTests(unittest.TestCase):
         record = {"dataset": spec[0], "status": "VALID_SAMPLE", "run_id": 1, "job_id": 2}
         self.assertEqual(split_probes([spec, changed], {probe_key(spec): record}), ([spec], [changed]))
         self.assertEqual(split_probes([spec], {probe_key(spec): record | {"job_id": None}}), ([], [spec]))
+
+    def test_rate_limit_stops_pending_probe_submission(self):
+        from unittest.mock import patch
+        from scripts.r11_backer.dataset_pilot import PROBES, probe_key, run_pending
+
+        with patch("scripts.r11_backer.dataset_pilot.probe", return_value="RATE_LIMITED") as request:
+            results = run_pending(PROBES[:3], "test-token", workers=1)
+        self.assertEqual(results, {probe_key(PROBES[0]): "RATE_LIMITED"})
+        self.assertEqual(request.call_count, 1)
