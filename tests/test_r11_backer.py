@@ -324,3 +324,24 @@ class ReleaseSweepTests(unittest.TestCase):
         self.assertEqual(inspected.status, "DATE_UNVERIFIED")
         self.assertEqual(inspected.date_issue, "ISO_DATE_TIME")
         self.assertEqual(inspected.rows, ())
+
+    def test_market_subset_rejects_out_of_scope_even_with_reference_match(self):
+        from scripts.r11_backer.market_scope import audit_market, market_universe
+        from scripts.r11_backer.release_probes import Sample
+
+        master = market_universe(({"stock_id": "2330", "type": "twse"},
+                                  {"stock_id": "6488", "type": "tpex"},
+                                  {"stock_id": "AB99", "type": "twse"}))
+        reference = {"date": "2026-11-24", "stock_id": "2330"}
+        market = Sample("VALID_SAMPLE", rows=(reference, {"date": "2026-11-24", "stock_id": "99999"}))
+        check = audit_market(market, {"2330": Sample("VALID_SAMPLE", rows=(reference,))},
+                             master, ("date", "stock_id"))
+        self.assertEqual(check["matched_reference_queries"], 1)
+        self.assertEqual(check["verdict"], "HOLD_OUT_OF_SCOPE_ROWS")
+
+    def test_gold_day_marker_is_distinct_from_intraday_data(self):
+        from scripts.r11_backer.release_probes import observation_date
+
+        self.assertEqual(observation_date("GoldPrice", "2026-11-24 00:00:00"), date(2026, 11, 24))
+        with self.assertRaises(ValueError):
+            observation_date("GoldPrice", "2026-11-24 09:00:00")

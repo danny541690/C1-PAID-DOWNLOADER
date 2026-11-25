@@ -3,7 +3,7 @@
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 import gzip
 import hashlib
 import json
@@ -116,6 +116,18 @@ def date_shape(value):
     return "NON_ISO_DATE"
 
 
+def observation_date(dataset, value):
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError):
+        if dataset != "GoldPrice" or date_shape(value) != "ISO_DATE_TIME":
+            raise
+        timestamp = datetime.fromisoformat(value)
+        if timestamp.time() != time.min:
+            raise ValueError("timestamp is not a daily observation marker")
+        return timestamp.date()
+
+
 def request_sample(task, contract, auth, *, max_bytes=MAX_BYTES):
     started = monotonic()
     url = "https://api.finmindtrade.com/api/v4/data?" + urlencode(task.parameters())
@@ -164,7 +176,7 @@ def request_sample(task, contract, auth, *, max_bytes=MAX_BYTES):
         days = []
         for row in rows:
             try:
-                days.append(date.fromisoformat(row.get("date")).isoformat())
+                days.append(observation_date(task.dataset, row.get("date")).isoformat())
             except (TypeError, ValueError):
                 return Sample("DATE_UNVERIFIED", monotonic() - started, date_issue=date_shape(row.get("date")))
         earlier = min(days) < task.start
