@@ -78,7 +78,7 @@ def finmind_status():
         return "USAGE_UNVERIFIED"
     if limit < 1600:
         return "LIMIT_BELOW_BACKER_REFERENCE"
-    if limit - used < 2:
+    if limit - used < 3:
         return "NO_ACCOUNT_HEADROOM"
     return "ACCOUNT_HEADROOM_OBSERVED"
 

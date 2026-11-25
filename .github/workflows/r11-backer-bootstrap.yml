@@ -12,6 +12,9 @@ on:
       - scripts/r11_backer/**
       - tests/test_r11_backer.py
       - .github/workflows/r11-backer-bootstrap.yml
+concurrency:
+  group: r11-backer-pilot-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
@@ -61,7 +64,7 @@ jobs:
           api="repos/$GITHUB_REPOSITORY"
           path=".jarvis-test/r11-synthetic.json"
           gh api "$api/git/refs" -f ref="refs/heads/$branch" -f sha="$GITHUB_SHA" >/dev/null
-          payload=$(printf '{"remaining":1,"owner":null}' | base64 -w0)
+          payload=$(printf '{"remaining":1,"owner":null,"events":[],"paused_until":0}' | base64 -w0)
           seed=$(gh api --method PUT "$api/contents/$path" -f branch="$branch" -f content="$payload" -f message='Seed synthetic quota test' --jq .content.sha)
           test -n "$seed"
           printf 'seed=%s\n' "$seed" >> "$GITHUB_OUTPUT"
@@ -76,6 +79,7 @@ jobs:
       matrix:
         worker: [alpha, beta, gamma]
     steps:
+      - uses: actions/checkout@v4
       - id: claim
         env:
           GH_TOKEN: ${{ github.token }}
@@ -85,7 +89,21 @@ jobs:
           set -euo pipefail
           branch="codex/r11-cas-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           api="repos/$GITHUB_REPOSITORY/contents/.jarvis-test/r11-synthetic.json"
-          payload=$(printf '{"remaining":0,"owner":"%s"}' "$WORKER" | base64 -w0)
+          now=$(date +%s)
+          snapshot=$(gh api "$api?ref=$branch" --jq '.content | @base64d')
+          if jq -e '.remaining == 1' <<< "$snapshot" >/dev/null; then
+            python3 - "$now" "$snapshot" <<'PYCODE'
+          import json
+          import sys
+          from scripts.r11_backer.quota import can_reserve
+
+          state = json.loads(sys.argv[2])
+          if not can_reserve(state["events"], int(sys.argv[1]), "probe",
+                             total_limit=1, paused_until=state["paused_until"]):
+              raise SystemExit("pilot rolling quota unavailable")
+          PYCODE
+          fi
+          payload=$(jq -nc --arg worker "$WORKER" --argjson now "$now"             '{remaining:0,owner:$worker,events:[[$now,"probe"]],paused_until:0}' | base64 -w0)
           if gh api --method PUT "$api" -f branch="$branch" -f sha="$SEED" -f content="$payload" -f message='Claim synthetic quota' >"$RUNNER_TEMP/claim" 2>"$RUNNER_TEMP/claim-error"; then
             result=GRANTED
           else
@@ -93,7 +111,7 @@ jobs:
             result=STALE_REJECTED
           fi
           state=$(gh api "$api?ref=$branch" --jq '.content | @base64d | fromjson')
-          jq -e '.remaining == 0 and (.owner == "alpha" or .owner == "beta" or .owner == "gamma")' <<< "$state" >/dev/null
+          jq -e '.remaining == 0 and (.events | length == 1) and .events[0][1] == "probe" and (.owner == "alpha" or .owner == "beta" or .owner == "gamma")' <<< "$state" >/dev/null
           if [[ "$result" == GRANTED ]]; then
             jq -e --arg worker "$WORKER" '.owner == $worker' <<< "$state" >/dev/null
           else
@@ -101,8 +119,6 @@ jobs:
           fi
           printf 'synthetic_claim=%s\n' "$result"
           printf 'result=%s\n' "$result" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
-        if: steps.claim.outputs.result == 'GRANTED'
       - name: Make one real Backer request against the reserved pilot slot
         if: steps.claim.outputs.result == 'GRANTED'
         env:

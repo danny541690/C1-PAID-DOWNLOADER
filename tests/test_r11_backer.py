@@ -132,3 +132,14 @@ class RollingQuotaTests(unittest.TestCase):
         self.assertFalse(can_reserve(full, 3699, "retry"))
         self.assertFalse(can_reserve(full, 3699, "probe"))
         self.assertTrue(can_reserve(full, 3700, "download"))
+
+    def test_retry_after_blocks_all_request_types_until_deadline(self):
+        from scripts.r11_backer.quota import can_reserve, retry_deadline
+
+        deadline = retry_deadline("90", 100)
+        self.assertEqual(deadline, 190)
+        self.assertEqual(retry_deadline("Thu, 01 Jan 1970 00:03:10 GMT", 100), 190)
+        self.assertEqual(retry_deadline("invalid", 100), 160)
+        for purpose in ("download", "probe", "retry"):
+            self.assertFalse(can_reserve([], 189, purpose, paused_until=deadline))
+            self.assertTrue(can_reserve([], 190, purpose, paused_until=deadline))
