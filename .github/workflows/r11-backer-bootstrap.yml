@@ -196,6 +196,23 @@ jobs:
           path: r11-release-probes.json
           if-no-files-found: error
           retention-days: 30
+  gap-diagnostics:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-gap-preflight]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Recheck changed query windows and measure larger all-market responses
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_gaps
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-release-gaps-${{ github.run_attempt }}
+          path: r11-release-gaps.json
+          if-no-files-found: error
+          retention-days: 30
   paid-archive-readback:
     needs: release-sweep
     if: needs.release-sweep.outputs.archive == 'STAGED_PRIVATE_SAMPLES'

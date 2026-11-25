@@ -79,6 +79,7 @@ class Sample:
     raw: bytes = b""
     rows: tuple = ()
     documented_missing: tuple = ()
+    date_issue: str | None = None
 
 
 def contracts(markdown):
@@ -103,14 +104,33 @@ def contracts(markdown):
     return result
 
 
-def request_sample(task, contract, auth):
+def date_shape(value):
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}[T ].+", value):
+        return "ISO_DATE_TIME"
+    if isinstance(value, str) and re.fullmatch(r"\d{4}/\d{2}/\d{2}", value):
+        return "SLASH_DATE"
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}", value):
+        return "MONTH_ONLY"
+    if value is None:
+        return "MISSING_DATE"
+    return "NON_ISO_DATE"
+
+
+def request_sample(task, contract, auth, *, max_bytes=MAX_BYTES):
     started = monotonic()
     url = "https://api.finmindtrade.com/api/v4/data?" + urlencode(task.parameters())
-    req = Request(url, headers={"Authorization": "Bearer " + auth, "Accept": "application/json"})
+    req = Request(url, headers={
+        "Authorization": "Bearer " + auth,
+        "Accept": "application/json", "Accept-Encoding": "gzip",
+    })
     try:
         with build_opener(NoRedirect()).open(req, timeout=25) as response:
-            raw = response.read(MAX_BYTES + 1)
-        if len(raw) > MAX_BYTES:
+            if response.headers.get("Content-Encoding", "").lower() == "gzip":
+                with gzip.GzipFile(fileobj=response) as stream:
+                    raw = stream.read(max_bytes + 1)
+            else:
+                raw = response.read(max_bytes + 1)
+        if len(raw) > max_bytes:
             return Sample("SIZE_LIMIT", monotonic() - started)
         data = json.loads(raw)
     except HTTPError as error:
@@ -122,7 +142,7 @@ def request_sample(task, contract, auth):
         return Sample(status, monotonic() - started)
     except (URLError, TimeoutError):
         return Sample("HTTP_TRANSIENT", monotonic() - started)
-    except (ValueError, UnicodeError):
+    except (ValueError, UnicodeError, gzip.BadGzipFile, EOFError):
         return Sample("INVALID_RESPONSE", monotonic() - started)
 
     if not isinstance(data, dict):
@@ -141,26 +161,32 @@ def request_sample(task, contract, auth):
         return Sample("INVALID_RESPONSE", monotonic() - started)
 
     if task.start and task.end:
-        try:
-            days = [date.fromisoformat(row["date"]) for row in rows]
-            if min(days).isoformat() < task.start or max(days).isoformat() > task.end:
-                return Sample("OUTSIDE_WINDOW", monotonic() - started)
-        except (KeyError, TypeError, ValueError):
-            return Sample("DATE_UNVERIFIED", monotonic() - started)
+        days = []
+        for row in rows:
+            try:
+                days.append(date.fromisoformat(row.get("date")).isoformat())
+            except (TypeError, ValueError):
+                return Sample("DATE_UNVERIFIED", monotonic() - started, date_issue=date_shape(row.get("date")))
+        earlier = min(days) < task.start
+        later = max(days) > task.end
+        if earlier or later:
+            issue = "BOTH" if earlier and later else "BEFORE_START" if earlier else "AFTER_END"
+            return Sample("OUTSIDE_WINDOW", monotonic() - started, date_issue=issue)
 
     missing = tuple(sorted(set(contract.fields).difference(set.intersection(*(set(r) for r in rows)))))
     status = "FIELD_DIFFERENCES" if missing else "VALID_SAMPLE"
     return Sample(status, monotonic() - started, raw, tuple(rows), missing)
 
 
-def run_parallel(tasks, documented, auth, workers=WORKERS):
+def run_parallel(tasks, documented, auth, workers=WORKERS, *, reader=None):
     """Return one outcome per dispatched request and stop dispatch on a provider 429."""
+    reader = reader or request_sample
     tasks = list(dict.fromkeys(tasks))
     pending = iter(tasks)
     results = {}
     rate_limited = False
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        active = {pool.submit(request_sample, item, documented[item.dataset], auth): item
+        active = {pool.submit(reader, item, documented[item.dataset], auth): item
                   for item in tasks[:workers]}
         for _ in active:
             next(pending)
@@ -174,7 +200,7 @@ def run_parallel(tasks, documented, auth, workers=WORKERS):
                 for _ in finished:
                     item = next(pending, None)
                     if item is not None:
-                        active[pool.submit(request_sample, item, documented[item.dataset], auth)] = item
+                        active[pool.submit(reader, item, documented[item.dataset], auth)] = item
     for task in tasks:
         results.setdefault(task, Sample("NOT_SENT_RATE_LIMIT"))
     return results

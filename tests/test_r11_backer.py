@@ -299,3 +299,28 @@ class ReleaseSweepTests(unittest.TestCase):
         self.assertEqual(statuses["R11-T14"], "HOLD")
         self.assertEqual(statuses["R11-T01"], "HOLD")
         self.assertEqual(statuses["R11-T15"], "PASS_PILOT")
+
+    def test_gzip_sample_limited_by_decoded_bytes_and_date_shape(self):
+        import gzip
+        import io
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from scripts.r11_backer.release_probes import Contract, Task, request_sample
+
+        raw = b'{"status":200,"data":[{"date":"2026-11-24 09:30:00","value":1}]}'
+        task = Task("PublicExample", "2026-11-24", "2026-11-24")
+        doc = Contract("Backer", "", "", ("date", "value"))
+
+        def open_response(*args, **kwargs):
+            response = io.BytesIO(gzip.compress(raw))
+            response.headers = {"Content-Encoding": "gzip"}
+            return response
+
+        with patch("scripts.r11_backer.release_probes.build_opener",
+                   return_value=SimpleNamespace(open=open_response)):
+            capped = request_sample(task, doc, "synthetic", max_bytes=len(raw) - 1)
+            inspected = request_sample(task, doc, "synthetic", max_bytes=len(raw))
+        self.assertEqual(capped.status, "SIZE_LIMIT")
+        self.assertEqual(inspected.status, "DATE_UNVERIFIED")
+        self.assertEqual(inspected.date_issue, "ISO_DATE_TIME")
+        self.assertEqual(inspected.rows, ())
