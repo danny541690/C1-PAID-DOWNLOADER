@@ -75,7 +75,8 @@ jobs:
       matrix:
         worker: [alpha, beta, gamma]
     steps:
-      - env:
+      - id: claim
+        env:
           GH_TOKEN: ${{ github.token }}
           SEED: ${{ needs.remote-seed.outputs.seed }}
           WORKER: ${{ matrix.worker }}
@@ -98,18 +99,28 @@ jobs:
             jq -e --arg worker "$WORKER" '.owner != $worker' <<< "$state" >/dev/null
           fi
           printf 'synthetic_claim=%s\n' "$result"
-  drive-round-trip:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
+          printf 'result=%s\n' "$result" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
-      - name: Exercise recovery folder and synthetic archive replay
+        if: steps.claim.outputs.result == 'GRANTED'
+      - name: Write isolated archive with the single granted claim
+        if: steps.claim.outputs.result == 'GRANTED'
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.drive_pilot
+  drive-round-trip:
+    needs: remote-claim
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read back the unique archive from a different runner
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.drive_pilot --verify-only
   pilot-verdict:
     if: always() && github.event_name == 'push'
     needs: [synthetic-checks, live-read-only-preflight, remote-claim, drive-round-trip]

@@ -1,5 +1,6 @@
 """Synthetic Drive round trip, scoped to the project's recovery directory."""
 
+import argparse
 from datetime import date
 import gzip
 import hashlib
@@ -41,9 +42,11 @@ def find(parent, name, access):
     return entries[0] if entries else None
 
 
-def ensure(parent, name, mime, access, content=None):
+def ensure(parent, name, mime, access, content=None, *, create):
     existing = find(parent, name, access)
     if existing is None:
+        if not create:
+            raise RuntimeError("expected Drive child missing")
         metadata = json.dumps({"name": name, "parents": [parent], "mimeType": mime}).encode()
         endpoint = f"{BASE}/files"
         headers = {"Content-Type": "application/json"}
@@ -71,13 +74,14 @@ def ensure(parent, name, mime, access, content=None):
     return existing["id"]
 
 
-def run():
+def run(*, create):
     access = token()
     recovery = find(ROOT, "99_RECOVERY", access)
     if not recovery or recovery["mimeType"] != FOLDER or recovery["parents"] != [ROOT]:
         raise RuntimeError("recovery directory unavailable")
     run_id = int(os.environ["GITHUB_RUN_ID"])
-    sandbox = f"R11_SYNTHETIC_PILOT_{run_id}"
+    attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+    sandbox = f"R11_SYNTHETIC_PILOT_{run_id}_{attempt}"
     dates = [date(1982, 12, 1), date(1983, 1, 1)]
     plan = archive_plan(dates)
     if plan.months != ("1982-12", "1983-01"):
@@ -85,11 +89,13 @@ def run():
     original = json.dumps({"synthetic": True, "dates": [day.isoformat() for day in dates]}).encode()
     compressed, raw_sha, gzip_sha = compress_original(original)
 
-    def archive():
+    def archive(*, create):
         parent = recovery["id"]
         for name in [sandbox, *plan.anchor.split("/")]:
-            parent = ensure(parent, name, FOLDER, access)
-        file_id = ensure(parent, "synthetic.json.gz", "application/gzip", access, compressed)
+            parent = ensure(parent, name, FOLDER, access, create=create)
+        file_id = ensure(
+            parent, "synthetic.json.gz", "application/gzip", access, compressed, create=create
+        )
         req = Request(f"{BASE}/files/{file_id}?alt=media", headers={"Authorization": f"Bearer {access}"})
         with build_opener(NoRedirect()).open(req, timeout=20) as response:
             saved = response.read(len(compressed) + 1)
@@ -99,14 +105,17 @@ def run():
             raise RuntimeError("raw checksum mismatch")
         return parent, file_id
 
-    first = archive()
-    if archive() != first:
+    first = archive(create=create)
+    if archive(create=False) != first:
         raise RuntimeError("replay created a different Drive object")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--verify-only", action="store_true")
+    args = parser.parse_args()
     try:
-        run()
+        run(create=not args.verify_only)
     except Exception as error:
         print(f"drive_synthetic_round_trip=FAIL ({type(error).__name__})")
         raise SystemExit(1) from None
