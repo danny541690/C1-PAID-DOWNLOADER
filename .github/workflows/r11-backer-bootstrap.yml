@@ -98,9 +98,21 @@ jobs:
             jq -e --arg worker "$WORKER" '.owner != $worker' <<< "$state" >/dev/null
           fi
           printf 'synthetic_claim=%s\n' "$result"
+  drive-round-trip:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise recovery folder and synthetic archive replay
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.drive_pilot
   pilot-verdict:
     if: always() && github.event_name == 'push'
-    needs: [synthetic-checks, live-read-only-preflight, remote-claim]
+    needs: [synthetic-checks, live-read-only-preflight, remote-claim, drive-round-trip]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -108,6 +120,7 @@ jobs:
         env:
           REGRESSION: ${{ needs.synthetic-checks.result }}
           LIVE_JOB: ${{ needs.live-read-only-preflight.result }}
+          DRIVE_ROUND_TRIP: ${{ needs.drive-round-trip.result }}
           REMOTE: ${{ needs.remote-claim.result }}
           LIVE_PILOT: ${{ needs.live-read-only-preflight.outputs.pilot }}
           DRIVE: ${{ needs.live-read-only-preflight.outputs.drive }}
@@ -116,7 +129,7 @@ jobs:
           RECENT: ${{ needs.live-read-only-preflight.outputs.recent }}
         run: |
           verdict=HOLD
-          if [[ "$REGRESSION" == success && "$LIVE_JOB" == success && "$LIVE_PILOT" == PASS && "$REMOTE" == success ]]; then
+          if [[ "$REGRESSION" == success && "$LIVE_JOB" == success && "$LIVE_PILOT" == PASS && "$REMOTE" == success && "$DRIVE_ROUND_TRIP" == success ]]; then
             verdict=PASS
           fi
           {
@@ -128,6 +141,7 @@ jobs:
             printf -- '- Historical sample: %s\n' "${HISTORICAL:-NO_RESULT}"
             printf -- '- Recent 120-day sample: %s\n' "${RECENT:-NO_RESULT}"
             printf -- '- Cross-runner synthetic quota: %s\n' "$REMOTE"
+            printf -- '- Drive synthetic archive and replay: %s\n' "$DRIVE_ROUND_TRIP"
             printf -- '- Production release: HOLD (outside this pilot)\n'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           test "$verdict" = PASS
