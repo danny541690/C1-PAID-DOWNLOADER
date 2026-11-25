@@ -6,7 +6,9 @@ import tempfile
 import unittest
 
 from scripts.r11_backer.archive import archive_plan, compress_original
-from scripts.r11_backer.live_preflight import validate_month_sample
+from scripts.r11_backer.live_preflight import (
+    REQUIRED_PILOT_RESULTS, pilot_status, validate_month_sample,
+)
 from scripts.r11_backer.preflight import GATES, SLOTS, read_catalog, release_holds
 
 
@@ -109,3 +111,11 @@ class DispatchTests(unittest.TestCase):
                 restarted.seed([self.early, self.recent])
                 self.assertEqual(restarted.claim("B01", 150, 30), (self.early.task_id, 2))
                 self.assertIsNone(restarted.claim("B01", 150, 30))
+
+    def test_pilot_requires_every_real_check(self):
+        self.assertEqual(pilot_status(REQUIRED_PILOT_RESULTS), "PASS")
+        self.assertEqual(pilot_status({}), "HOLD")
+        self.assertEqual(
+            pilot_status(REQUIRED_PILOT_RESULTS | {"backer_recent_probe": "EMPTY_WINDOW"}),
+            "HOLD",
+        )

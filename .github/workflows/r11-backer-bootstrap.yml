@@ -1,4 +1,4 @@
-name: R11.1 Backer bootstrap checks
+name: R11.1 Backer pre-release pilot
 on:
   push:
     branches:
@@ -28,12 +28,50 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight'
     runs-on: ubuntu-latest
     timeout-minutes: 4
+    outputs:
+      pilot: ${{ steps.probe.outputs.pilot }}
+      drive: ${{ steps.probe.outputs.drive }}
+      finmind: ${{ steps.probe.outputs.finmind }}
+      historical: ${{ steps.probe.outputs.backer_historical_probe }}
+      recent: ${{ steps.probe.outputs.backer_recent_probe }}
     steps:
       - uses: actions/checkout@v4
-      - name: Check account metadata without emitting private values
+      - name: Check Drive metadata and bounded Backer samples
+        id: probe
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
           FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
         run: python3 -m scripts.r11_backer.live_preflight
+  pilot-verdict:
+    if: always() && github.event_name == 'push'
+    needs: [synthetic-checks, live-read-only-preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Publish consolidated pilot verdict
+        env:
+          REGRESSION: ${{ needs.synthetic-checks.result }}
+          LIVE_JOB: ${{ needs.live-read-only-preflight.result }}
+          LIVE_PILOT: ${{ needs.live-read-only-preflight.outputs.pilot }}
+          DRIVE: ${{ needs.live-read-only-preflight.outputs.drive }}
+          FINMIND: ${{ needs.live-read-only-preflight.outputs.finmind }}
+          HISTORICAL: ${{ needs.live-read-only-preflight.outputs.historical }}
+          RECENT: ${{ needs.live-read-only-preflight.outputs.recent }}
+        run: |
+          verdict=HOLD
+          if [[ "$REGRESSION" == success && "$LIVE_JOB" == success && "$LIVE_PILOT" == PASS ]]; then
+            verdict=PASS
+          fi
+          {
+            printf '## Backer pre-release pilot\n\n'
+            printf -- '- Pilot verdict: %s\n' "$verdict"
+            printf -- '- Synthetic regression: %s\n' "$REGRESSION"
+            printf -- '- Drive metadata and target: %s\n' "${DRIVE:-NO_RESULT}"
+            printf -- '- FinMind account quota: %s\n' "${FINMIND:-NO_RESULT}"
+            printf -- '- Historical sample: %s\n' "${HISTORICAL:-NO_RESULT}"
+            printf -- '- Recent 120-day sample: %s\n' "${RECENT:-NO_RESULT}"
+            printf -- '- Production release: HOLD (outside this pilot)\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$verdict" = PASS

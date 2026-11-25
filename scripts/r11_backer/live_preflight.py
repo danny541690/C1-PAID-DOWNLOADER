@@ -126,26 +126,46 @@ def probe_business_indicator(start, end):
         return "CHECK_FAILED"
 
 
+REQUIRED_PILOT_RESULTS = {
+    "drive": "POSITIVE_CAPACITY_AND_BRONZE_ACCESS",
+    "finmind": "ACCOUNT_HEADROOM_OBSERVED",
+    "backer_historical_probe": "VALID_MONTH_SAMPLE",
+    "backer_recent_probe": "VALID_MONTH_SAMPLE",
+}
+
+
+def pilot_status(results):
+    if all(results.get(check) == value for check, value in REQUIRED_PILOT_RESULTS.items()):
+        return "PASS"
+    return "HOLD"
+
+
 def main():
-    statuses = {}
+    statuses = dict.fromkeys(REQUIRED_PILOT_RESULTS, "SKIPPED")
     for provider, check in (("drive", drive_status), ("finmind", finmind_status)):
         try:
-            status = check()
+            statuses[provider] = check()
         except Exception:
-            status = "CHECK_FAILED"
-        statuses[provider] = status
-        print(f"{provider}={status}")
-    if statuses["finmind"] == "ACCOUNT_HEADROOM_OBSERVED":
+            statuses[provider] = "CHECK_FAILED"
+    if statuses["finmind"] == REQUIRED_PILOT_RESULTS["finmind"]:
         historic = probe_business_indicator(date(1982, 1, 1), date(1982, 1, 31))
-        print(f"backer_historical_probe={historic}")
+        statuses["backer_historical_probe"] = historic
         if historic in ("VALID_MONTH_SAMPLE", "EMPTY_WINDOW"):
             today = datetime.now(ZoneInfo("Asia/Taipei")).date()
-            last_complete_month = today.replace(day=1) - timedelta(days=1)
-            recent = probe_business_indicator(
-                last_complete_month.replace(day=1), last_complete_month
+            statuses["backer_recent_probe"] = probe_business_indicator(
+                today - timedelta(days=119), today
             )
-            print(f"backer_recent_probe={recent}")
+
+    result = pilot_status(statuses)
+    for check, value in statuses.items():
+        print(f"{check}={value}")
+    print(f"pilot={result}")
     print("production=HOLD")
+    if output := os.environ.get("GITHUB_OUTPUT"):
+        with open(output, "a", encoding="utf-8") as stream:
+            for check, value in statuses.items():
+                stream.write(f"{check}={value}\n")
+            stream.write(f"pilot={result}\n")
 
 
 if __name__ == "__main__":
