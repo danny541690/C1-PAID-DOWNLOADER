@@ -1,0 +1,26 @@
+name: R11.1 Backer bootstrap checks
+on:
+  push:
+    branches:
+      - codex/r11-1-backer-preflight
+    paths:
+      - scripts/r11_backer/**
+      - tests/test_r11_backer.py
+      - .github/workflows/r11-backer-bootstrap.yml
+  pull_request:
+    paths:
+      - scripts/r11_backer/**
+      - tests/test_r11_backer.py
+      - .github/workflows/r11-backer-bootstrap.yml
+permissions:
+  contents: read
+jobs:
+  synthetic-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify historical candidate catalog and release holds
+        run: python3 -m scripts.r11_backer.preflight --catalog-only
+      - name: Run synthetic archive and preflight tests
+        run: python3 -m unittest discover -s tests -p test_r11_backer.py -v
