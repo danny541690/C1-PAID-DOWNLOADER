@@ -277,6 +277,88 @@ jobs:
           name: r11-manifest-readiness-${{ github.run_attempt }}
       - name: Independently regenerate and compare the frozen test manifest and checks
         run: python3 -m scripts.r11_backer.manifest_pilot --verify-only
+  integration-b00:
+    name: B00 freeze combined test manifest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-integration-test]')
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Seed the shared ledger and private recovery sandbox
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.integration_pilot seed
+  integration-workers:
+    name: ${{ matrix.worker }} claim and archive
+    needs: integration-b00
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [B01, B01-contender, B02, B03, B04, B05, B06, B07, B08]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Exercise lease contention and verified private Drive staging
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          R11_WORKER: ${{ matrix.worker }}
+        run: python3 -m scripts.r11_backer.integration_pilot work
+  integration-b09:
+    name: B09 recover an interrupted task
+    needs: integration-workers
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Adopt the staged archive and reject the old lease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.integration_pilot recover
+  integration-b10:
+    name: B10 independently reconcile G0-G5
+    needs: [integration-b09, synthetic-checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read back the fixed manifest and private Drive inventory
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.integration_pilot accept | tee -a "$GITHUB_STEP_SUMMARY"
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r11-integration-verdict-${{ github.run_attempt }}
+          path: r11-integration-verdict.json
+          if-no-files-found: error
+          retention-days: 30
   paid-archive-readback:
     needs: release-sweep
     if: needs.release-sweep.outputs.archive == 'STAGED_PRIVATE_SAMPLES'

@@ -349,7 +349,7 @@ def blast_summary(benchmark_results, days):
     return report
 
 
-def recovery_location(access):
+def recovery_location(access, *, prefix="R11_RELEASE_PREFLIGHT"):
     project = read_json(f"{BASE}/files/{ROOT}?fields=shared", access)
     recovery = read_json(
         f"{BASE}/files/{RECOVERY_ROOT}?fields=id,name,parents,shared,mimeType,trashed", access
@@ -363,7 +363,7 @@ def recovery_location(access):
         raise ValueError("private recovery location is not verified")
     run_id = int(os.environ["GITHUB_RUN_ID"])
     attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
-    return f"R11_RELEASE_PREFLIGHT_{run_id}_{attempt}"
+    return f"{prefix}_{run_id}_{attempt}"
 
 
 def read_private_file(file_id, access):
