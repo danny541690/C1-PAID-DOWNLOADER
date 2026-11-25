@@ -661,3 +661,45 @@ class TPExHistoricalEvidenceTests(unittest.TestCase):
         self.assertEqual(receipts[0]["source_row_sha256"], hashlib.sha256(json_bytes(first)).hexdigest())
         self.assertEqual(receipts[0]["original_sha256"], hashlib.sha256(raw).hexdigest())
         self.assertEqual(receipts[0]["backer_status"], "HOLD_SOURCE_GAP")
+
+    def test_early_tpex_rows_use_requested_month_symbol_and_actual_turnover(self):
+        from scripts.r11_backer.test_archive import json_bytes
+        from scripts.r11_backer.tpex_calendar import Source, monthly_rows
+
+        month = date(1994, 1, 1)
+        source = Source(month, "5301")
+        document = {"stat": "ok", "date": "19940101", "code": "5301", "tables": [
+            {"fields": ["日 期", "成交仟股", "收盤", "筆數"],
+             "data": [["83/01/05", "0", "--", "0"], ["83/01/25＊", "0", "11.50", "2"]]},
+        ]}
+        result = monthly_rows(json_bytes(document), source)
+        self.assertFalse(result[date(1994, 1, 5)]["traded"])
+        self.assertTrue(result[date(1994, 1, 25)]["traded"])
+        with self.assertRaises(ValueError):
+            monthly_rows(json_bytes(document), Source(month, "5302"))
+        document["tables"][0]["data"].append(["83/02/01", "2", "12", "1"])
+        with self.assertRaises(ValueError):
+            monthly_rows(json_bytes(document), source)
+
+    def test_tpex_yearbook_correction_needs_matching_index_and_dated_trades(self):
+        from decimal import Decimal
+        from scripts.r11_backer.tpex_calendar import verified_date_correction
+
+        old, expected = date(1999, 5, 30), date(1999, 5, 31)
+        market = {expected: {"source": "market#23", "traded": True, "reported_value": 169.86}}
+        stock = {expected: {"source": "stock#23", "traded": True, "positive_price": True}}
+        self.assertEqual(verified_date_correction({old}, {expected}, market, stock, Decimal("169.86"))["status"],
+                         "PASS_YEARBOOK_DATE_CORRECTION")
+        self.assertEqual(verified_date_correction({old}, {expected}, market, stock, Decimal("169.85"))["status"],
+                         "HOLD_DATE_CONFLICT")
+        stock[expected]["traded"] = False
+        self.assertEqual(verified_date_correction({old}, {expected}, market, stock, Decimal("169.86"))["status"],
+                         "HOLD_DATE_CONFLICT")
+
+    def test_tp_ex_annual_turnover_does_not_force_one_day_count_from_rounded_values(self):
+        from decimal import Decimal
+        from scripts.r11_backer.tpex_calendar import supported_session_counts
+
+        self.assertEqual(supported_session_counts(Decimal("11981.58"), Decimal("44.21")), [271])
+        self.assertGreater(len(supported_session_counts(Decimal("27.96"), Decimal("0.10"))), 1)
+        self.assertEqual(supported_session_counts(Decimal("0.01"), None), [])

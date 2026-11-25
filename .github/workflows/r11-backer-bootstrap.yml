@@ -450,6 +450,55 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.market_lifetimes --verify-only
+  tpex-official-calendar:
+    name: Verify TPEx early trading dates and yearbook discrepancy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-tpex-official-calendar]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official yearbook reader
+        run: |
+          python3 -m venv "$RUNNER_TEMP/r11-tpex"
+          "$RUNNER_TEMP/r11-tpex/bin/python" -m pip install --disable-pip-version-check --no-deps xlrd==2.0.1
+      - name: Compare original market and price records and archive the result privately
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: '"$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_calendar'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-tpex-official-calendar-${{ github.run_attempt }}
+          path: r11-tpex-history.json
+          if-no-files-found: error
+          retention-days: 30
+  tpex-official-calendar-readback:
+    name: Reproduce the TPEx calendar from private Drive sources
+    needs: [tpex-official-calendar, synthetic-checks]
+    if: needs.tpex-official-calendar.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official yearbook reader
+        run: |
+          python3 -m venv "$RUNNER_TEMP/r11-tpex"
+          "$RUNNER_TEMP/r11-tpex/bin/python" -m pip install --disable-pip-version-check --no-deps xlrd==2.0.1
+      - name: Verify archived file digests and reproduce the date reconciliation
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: '"$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_calendar --verify-only'
   manifest-preview:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
     runs-on: ubuntu-latest
@@ -677,6 +726,8 @@ jobs:
       - tpex-market-readback
       - market-lifetime-ledger
       - market-lifetime-readback
+      - tpex-official-calendar
+      - tpex-official-calendar-readback
       - manifest-preview
       - manifest-readback
       - integration-b00
