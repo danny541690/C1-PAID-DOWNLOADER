@@ -119,3 +119,16 @@ class DispatchTests(unittest.TestCase):
             pilot_status(REQUIRED_PILOT_RESULTS | {"backer_recent_probe": "EMPTY_WINDOW"}),
             "HOLD",
         )
+
+
+class RollingQuotaTests(unittest.TestCase):
+    def test_download_cap_reserve_and_full_account_cap(self):
+        from scripts.r11_backer.quota import can_reserve
+
+        downloads = [(100, "download")] * 1200
+        self.assertFalse(can_reserve(downloads, 3699, "download"))
+        self.assertTrue(can_reserve(downloads, 3699, "retry"))
+        full = downloads + [(100, "retry")] * 400
+        self.assertFalse(can_reserve(full, 3699, "retry"))
+        self.assertFalse(can_reserve(full, 3699, "probe"))
+        self.assertTrue(can_reserve(full, 3700, "download"))
