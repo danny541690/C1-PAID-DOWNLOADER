@@ -106,5 +106,113 @@
     "status": "VALID_SAMPLE",
     "run_id": 45594466552,
     "job_id": 139136868146
+  },
+  "c91c38a3caf580dccc4c8857490e7f0390554f92b79b23cc28d35269984d23a2": {
+    "dataset": "TaiwanStockPrice",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "fc9b3a13d3674aad56db45aaf9a41141eac29aeaf9e121eabffcf2d1680fddc2": {
+    "dataset": "TaiwanStockPrice",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "40b11661e500dc516a211f08e88414d38ff52793d2255d1ac362d3aba8df1ea2": {
+    "dataset": "TaiwanStockPrice",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "aec21d4e049581fccc98f0bc52ada6cef600f525cd28c54ab9a5b85ca477e94e": {
+    "dataset": "TaiwanStockPriceAdj",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "5760e0613cf01081ea5bf176c88c828ccaa483471d2d97bc55749c08cac69f53": {
+    "dataset": "TaiwanStockPriceAdj",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "1f09adf89c44f669a6ed037bf87c7e682a567f3aec228d384e337e51b04831c6": {
+    "dataset": "TaiwanStockFinancialStatements",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "b96bc9b2cf5243f6c9d98120b9b1a5d498a2e3340f22354b06effc069302a7a7": {
+    "dataset": "TaiwanStockFinancialStatements",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "de4e894979a73219267c2a1b22ac130eedd0af9d66cff4c67fce34ddf3e4960b": {
+    "dataset": "TaiwanStockFinancialStatements",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "9defab04a945238ec1aeebc307bde2141232b8bdd35514030b4912229b0f85c2": {
+    "dataset": "TaiwanStockBalanceSheet",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "c02578caf8fa17b31d51faf45490a8148befbe9aa6944621127d60c91eb4a3f6": {
+    "dataset": "TaiwanStockCashFlowsStatement",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "f695f7546e7f11514dffe02240e437788cede344a1de623eed2503642ea0b04f": {
+    "dataset": "TaiwanStockMonthRevenue",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "60d2bbcdf6dd15d6e89d15047ebea72366a3778f02ac4cea8b52a1eced84a707": {
+    "dataset": "TaiwanStockMonthRevenue",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "180be1c19737696305164e91b83e8ed067bad5cdabf8828714289967c1c87a53": {
+    "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+    "status": "EMPTY_WINDOW",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "c5bedd0aaa4f0382513eba783a64bbcb2b24bdbb8c61bace346feb274fe755c1": {
+    "dataset": "TaiwanStockMarginPurchaseShortSale",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "0e0b783d2df956845a22822185a67ae260f6acf443946646f17c1332308b5bcf": {
+    "dataset": "TaiwanStockHoldingSharesPer",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "298ed63ce25a9981ff90cc8c3a14d8bf69ffb17c8b75102c9d17ab86982974d9": {
+    "dataset": "TaiwanFuturesDaily",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "1765658b43e6f3359d5d75bbf38395510215069738ad29e2bd677b68dbf5d7a5": {
+    "dataset": "TaiwanExchangeRate",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
+  },
+  "86a15a2d6a16c85faad18f9f8e385dffde99a4a6e001c10ae584cd7a5824c166": {
+    "dataset": "TaiwanStockDividendResult",
+    "status": "VALID_SAMPLE",
+    "run_id": 45595104533,
+    "job_id": 139139108651
   }
 }

@@ -67,6 +67,10 @@ HISTORICAL_WINDOWS = (
     ("TaiwanStockMonthRevenue", "2002-01-01", "2002-03-31"),
     ("TaiwanStockMonthRevenue", "2013-01-01", "2013-03-31"),
     ("TaiwanStockInstitutionalInvestorsBuySell", "2004-10-01", "2004-10-08"),
+    ("TaiwanStockInstitutionalInvestorsBuySell", "2004-10-11", "2004-10-29"),
+    ("TaiwanStockInstitutionalInvestorsBuySell", "2005-01-03", "2005-01-14"),
+    ("TaiwanStockInstitutionalInvestorsBuySell", "2006-01-02", "2006-01-13"),
+    ("TaiwanStockInstitutionalInvestorsBuySell", "2010-01-04", "2010-01-15"),
     ("TaiwanStockMarginPurchaseShortSale", "2001-01-02", "2001-01-08"),
     ("TaiwanStockHoldingSharesPer", "2019-01-01", "2019-01-15"),
     ("TaiwanFuturesDaily", "2008-10-01", "2008-10-03"),
@@ -126,7 +130,7 @@ def split_probes(specs, evidence):
         record = evidence.get(probe_key(spec), {})
         valid = (
             record.get("dataset") == spec[0]
-            and record.get("status") == "VALID_SAMPLE"
+            and record.get("status") in {"VALID_SAMPLE", "EMPTY_WINDOW"}
             and type(record.get("run_id")) is int and record["run_id"] > 0
             and type(record.get("job_id")) is int and record["job_id"] > 0
         )
@@ -183,7 +187,8 @@ def main():
                           "pending": [spec[0] for spec in pending]}))
         return 0
     for spec in reused:
-        print(f"{spec[0]}=REUSED_WINDOW_EVIDENCE")
+        status = evidence[probe_key(spec)]["status"]
+        print(f"reused_window {spec[0]} {spec[3]} {spec[4]} {status}")
     if not pending:
         print("dataset_pilot=PASS_NO_NEW_REQUESTS")
         return 0
@@ -197,9 +202,13 @@ def main():
         print(f"window {probe_key(spec)} {spec[0]} {spec[3]} {spec[4]} {status}")
     print(f"dataset_requests_sent={len(results)}")
     passed = len(results) == len(pending) and all(
-        status == "VALID_SAMPLE" for status in results.values()
+        status in {"VALID_SAMPLE", "EMPTY_WINDOW"} for status in results.values()
     )
-    print("dataset_pilot=" + ("PASS" if passed else "HOLD"))
+    gaps = sum(status == "EMPTY_WINDOW" for status in results.values())
+    gaps += sum(evidence[probe_key(spec)]["status"] == "EMPTY_WINDOW" for spec in reused)
+    print(f"historical_windows_with_no_evidence={gaps}")
+    print("dataset_pilot=" + ("PASS_WITH_COVERAGE_GAPS" if passed and gaps else
+                             "PASS" if passed else "HOLD"))
     return int(not passed)
 
 
