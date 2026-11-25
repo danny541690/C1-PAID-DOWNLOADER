@@ -549,9 +549,23 @@ class HistoricalCapacityPilotTests(unittest.TestCase):
         from scripts.r11_backer.history_pilot import revenue_evidence
         from scripts.r11_backer.release_probes import Sample
 
-        rows = tuple({"date": f"2026-{month:02}-01", "revenue_year": 2026, "revenue_month": month,
-                      "stock_id": "2330", "create_time": "2026-11-26"} for month in (9, 10))
+        rows = tuple({"date": f"2026-{month + 1:02}-01", "revenue_year": 2026, "revenue_month": month,
+                      "stock_id": "2330", "create_time": "2026-11-26", "revenue": millions * 1_000_000}
+                     for month, millions in ((9, 511857), (10, 586890)))
         report = revenue_evidence(Sample("VALID_SAMPLE", rows=rows))
         self.assertEqual(report["status"], "PASS_PIT_PUBLICATION_DATE_SAMPLE")
         self.assertEqual(report["periods"][1]["official_announced_on"], "2026-11-10")
         self.assertEqual(report["periods"][1]["pit_calendar_lower_bound"], "2026-11-11")
+        self.assertEqual(report["periods"][1]["provider_query_date"], "2026-11-01")
+
+    def test_twse_history_rejects_shifted_or_duplicate_sessions(self):
+        from scripts.r11_backer.history_pilot import parse_twse_sessions
+
+        month = date(1994, 9, 1)
+        official = {"stat": "OK", "date": "19940901", "fields": ["日期", "成交股數"],
+                    "data": [[" 83/09/13", "100,000"], [" 83/09/14", "200,000"]]}
+        self.assertEqual(parse_twse_sessions(official, month), {date(1994, 9, 13), date(1994, 9, 14)})
+        with self.assertRaises(ValueError):
+            parse_twse_sessions(official, date(1994, 10, 1))
+        with self.assertRaises(ValueError):
+            parse_twse_sessions(official | {"data": official["data"] * 2}, month)

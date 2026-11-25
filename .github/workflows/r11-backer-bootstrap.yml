@@ -318,6 +318,28 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.history_pilot --verify-only
+  history-followup:
+    name: Reconcile the early TWSE calendar and monthly revenue
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-history-followup]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compare official historical sessions and fix period-based revenue retrieval
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 -m scripts.r11_backer.history_pilot --followup
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-history-followup-${{ github.run_attempt }}
+          path: |
+            r11-history-capacity.json
+            r11-twse-early-session-index.json
+          if-no-files-found: error
+          retention-days: 30
   manifest-preview:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
     runs-on: ubuntu-latest

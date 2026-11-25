@@ -1,6 +1,8 @@
 """Check historical boundaries, publication dates and archive capacity in one Backer run."""
 
 import argparse
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 import gzip
 import hashlib
@@ -8,6 +10,9 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from .archive import archive_plan, compress_original
@@ -31,11 +36,14 @@ BENCHMARK_DAY = date(2026, 11, 24)
 BENCHMARK_ARCHIVE_BYTES = 475771
 CALENDAR = Task("TaiwanStockTradingDate", None, None)
 EARLY_PRICE = Task(PRICE, "1994-01-01", "1998-12-31", "2330")
-REVENUE = Task("TaiwanStockMonthRevenue", "2026-09-01", "2026-10-31", "2330")
+REVENUE = Task("TaiwanStockMonthRevenue", "2026-10-01", "2026-11-01", "2330")
 REVENUE_RELEASES = {
-    date(2026, 9, 1): (date(2026, 10, 8), "https://pr.tsmc.com/english/news/3343"),
-    date(2026, 10, 1): (date(2026, 11, 10), "https://pr.tsmc.com/english/news/3349"),
+    date(2026, 9, 1): (date(2026, 10, 8), 511857, "https://pr.tsmc.com/english/news/3343"),
+    date(2026, 10, 1): (date(2026, 11, 10), 586890, "https://pr.tsmc.com/english/news/3349"),
 }
+TWSE_CALENDAR = "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK"
+TWSE_CALENDAR_DOC = "https://www.twse.com.tw/zh/trading/historical/fmtqik.html"
+TWSE_INDEX = Path("r11-twse-early-session-index.json")
 PREFIX = "R11_HISTORY_PILOT"
 RECEIPT_FILE = "history-index.json"
 PUBLIC_REPORT = Path("r11-history-capacity.json")
@@ -51,7 +59,11 @@ def iso_date(value):
 def months(first, last):
     while first <= last:
         yield first
-        first = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+        first = next_month(first)
+
+
+def next_month(day):
+    return (day.replace(day=28) + timedelta(days=4)).replace(day=1)
 
 
 def business_rows(rows):
@@ -132,13 +144,17 @@ def revenue_evidence(sample):
             period = date(int(row["revenue_year"]), int(row["revenue_month"]), 1)
             if period not in REVENUE_RELEASES or period in periods or row["stock_id"] != REVENUE.data_id:
                 return {"status": "HOLD_REVENUE_KEYS"}
-            if iso_date(row["date"]).replace(day=1) != period:
-                return {"status": "HOLD_REPORTING_PERIOD_CONFLICT"}
-            release, link = REVENUE_RELEASES[period]
-            periods[period] = {"period": period.strftime("%Y-%m"), "source_date_is_period": True,
+            source_date = iso_date(row["date"])
+            release, official_millions, link = REVENUE_RELEASES[period]
+            if source_date != next_month(period):
+                return {"status": "HOLD_QUERY_DATE_RULE"}
+            value = row["revenue"]
+            if type(value) is not int or abs(value - official_millions * 1_000_000) > 500_000:
+                return {"status": "HOLD_OFFICIAL_REVENUE_RECONCILIATION"}
+            periods[period] = {"period": period.strftime("%Y-%m"), "provider_query_date": source_date.isoformat(),
                                "official_announced_on": release.isoformat(),
                                "pit_calendar_lower_bound": (release + timedelta(days=1)).isoformat(),
-                               "publication_reference": link}
+                               "publication_reference": link, "matches_company_revenue_rounded_to_millions": True}
     except (TypeError, ValueError, KeyError):
         return {"status": "HOLD_REVENUE_DATE_CONTRACT"}
     return {"status": "PASS_PIT_PUBLICATION_DATE_SAMPLE" if periods.keys() == REVENUE_RELEASES.keys() else "HOLD_INCOMPLETE_RELEASE_SAMPLE",
@@ -152,6 +168,80 @@ def canonical_json(value):
 
 def sha(body):
     return hashlib.sha256(body).hexdigest()
+
+
+def parse_twse_sessions(document, month):
+    if document.get("stat") != "OK" or document.get("date") != month.strftime("%Y%m%d"):
+        raise ValueError("exchange calendar does not identify the requested month")
+    headers = document["fields"]
+    date_index = headers.index("日期")
+    close_index = headers.index("成交股數")
+    days = set()
+    for row in document["data"]:
+        year, mm, dd = map(int, row[date_index].strip().split("/"))
+        day = date(year + 1911, mm, dd)
+        if day.replace(day=1) != month or day in days or price_value(row[close_index]) is None:
+            raise ValueError("invalid or duplicated exchange session")
+        days.add(day)
+    if not days:
+        raise ValueError("exchange calendar is empty")
+    return days
+
+
+def twse_month(month):
+    query = urlencode({"date": month.strftime("%Y%m%d"), "response": "json"})
+    request = Request(f"{TWSE_CALENDAR}?{query}", headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+    try:
+        with urlopen(request, timeout=12) as response:
+            body = response.read(131073)
+        if len(body) > 131072:
+            raise ValueError("unexpected calendar response size")
+        return "PASS", parse_twse_sessions(json.loads(body), month)
+    except HTTPError as error:
+        return ("RATE_LIMITED" if error.code == 429 else "HOLD_EXCHANGE_HTTP"), set()
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return "HOLD_EXCHANGE_FORMAT_OR_NETWORK", set()
+
+
+def twse_history(start, end):
+    schedule = list(months(start, end))
+    results = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for offset in range(0, len(schedule), 4):
+            batch = schedule[offset:offset + 4]
+            results.update(zip(batch, pool.map(twse_month, batch)))
+            if any(results[month][0] == "RATE_LIMITED" for month in batch):
+                break
+    return results
+
+
+def followup():
+    auth = os.environ["FINMIND_BACKER_TOKEN"]
+    first_month, last_month = date(1994, 9, 1), date(1998, 12, 1)
+    expected_months = len(tuple(months(first_month, last_month)))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        calendar = pool.submit(twse_history, first_month, last_month)
+        received = run_parallel([EARLY_PRICE, REVENUE], pinned_contracts(), auth, workers=2)
+        results = calendar.result()
+    days = set().union(*(sessions for _, sessions in results.values()))
+    prices = received[EARLY_PRICE]
+    price_days = {iso_date(row["date"]) for row in prices.rows if row["stock_id"] == EARLY_PRICE.data_id}
+    outcomes = Counter(status for status, _ in results.values())
+    complete = outcomes["PASS"] == expected_months
+    consistent = prices.status == "VALID_SAMPLE" and bool(price_days) and len(price_days) == len(prices.rows) and price_days <= days
+    index = {"venue": "TWSE", "source": TWSE_CALENDAR_DOC, "start_month": first_month.isoformat(),
+             "end_month": last_month.isoformat(), "all_months_confirmed": complete,
+             "newest_first_sessions": [day.isoformat() for day in sorted(days, reverse=True)]}
+    TWSE_INDEX.write_bytes(canonical_json(index) + b"\n")
+    return {"status": "PASS_DIAGNOSTIC", "production": "HOLD", "prior_run": 45651295300,
+            "revenue_pit": revenue_evidence(received[REVENUE]),
+            "twse_early_sessions": {"status": "PASS_TWSE_SAMPLE_RECONCILED" if complete and consistent else "HOLD_TWSE_RECONCILIATION",
+                                    "official_reports_requested": len(results), "monthly_outcomes": dict(outcomes),
+                                    "official_sessions": len(days), "early_finmind_stock_dates": len(price_days),
+                                    "finmind_dates_on_official_calendar": len(price_days & days),
+                                    "index_sha256": sha(canonical_json(index)), "tpex_calendar": "HOLD_SEPARATE_VENUE_REQUIRED"},
+            "requests": sum(sample.status != "NOT_SENT_RATE_LIMIT" for sample in received.values()),
+            "rate_limited": any(sample.status in {"RATE_LIMITED", "NOT_SENT_RATE_LIMIT"} for sample in received.values())}
 
 
 def raw_month_manifest(indexed):
@@ -264,6 +354,7 @@ def run():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--followup", action="store_true")
     args = parser.parse_args()
     if args.verify_only:
         try:
@@ -273,7 +364,7 @@ def main():
             return 1
         return 0
     try:
-        report = run()
+        report = followup() if args.followup else run()
     except Exception as error:
         report = {"status": "HOLD_INFRASTRUCTURE", "production": "HOLD", "error_class": type(error).__name__}
     PUBLIC_REPORT.write_bytes(canonical_json(report) + b"\n")
@@ -281,6 +372,8 @@ def main():
     if path := os.environ.get("GITHUB_OUTPUT"):
         with open(path, "a", encoding="utf-8") as outputs:
             outputs.write(f"archive={report.get('storage', {}).get('archive', 'HOLD')}\n")
+    if args.followup:
+        return int(report["status"] != "PASS_DIAGNOSTIC" or report.get("rate_limited", False))
     return int(report["status"] != "PASS_DIAGNOSTIC" or report.get("rate_limited", False)
                or report.get("storage", {}).get("archive") != "STAGED")
 
