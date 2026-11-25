@@ -111,16 +111,19 @@ jobs:
         run: python3 -m scripts.r11_backer.drive_pilot
   drive-round-trip:
     needs: remote-claim
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Read back the unique archive from a different runner
+      - name: Recover the staged archive and reject late or duplicate commits
         env:
+          GH_TOKEN: ${{ github.token }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-        run: python3 -m scripts.r11_backer.drive_pilot --verify-only
+        run: bash scripts/r11_backer/recovery_pilot.sh
   pilot-verdict:
     if: always() && github.event_name == 'push'
     needs: [synthetic-checks, live-read-only-preflight, remote-claim, drive-round-trip]
@@ -152,7 +155,7 @@ jobs:
             printf -- '- Historical sample: %s\n' "${HISTORICAL:-NO_RESULT}"
             printf -- '- Recent 120-day sample: %s\n' "${RECENT:-NO_RESULT}"
             printf -- '- Cross-runner synthetic quota: %s\n' "$REMOTE"
-            printf -- '- Drive synthetic archive and replay: %s\n' "$DRIVE_ROUND_TRIP"
+            printf -- '- Drive synthetic archive and cross-runner recovery: %s\n' "$DRIVE_ROUND_TRIP"
             printf -- '- Production release: HOLD (outside this pilot)\n'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           test "$verdict" = PASS
