@@ -108,7 +108,7 @@ jobs:
           count=$(python3 -m scripts.r11_backer.dataset_pilot --count)
           now=$(date +%s)
           snapshot=$(gh api "$api?ref=$branch" --jq '.content | @base64d')
-          if jq -e '.remaining == 1' <<< "$snapshot" >/dev/null; then
+          if (( count > 0 )) && jq -e '.remaining == 1' <<< "$snapshot" >/dev/null; then
             python3 - "$now" "$snapshot" "$count" <<'PYCODE'
           import json
           import sys
