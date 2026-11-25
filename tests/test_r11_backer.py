@@ -345,3 +345,49 @@ class ReleaseSweepTests(unittest.TestCase):
         self.assertEqual(observation_date("GoldPrice", "2026-11-24 00:00:00"), date(2026, 11, 24))
         with self.assertRaises(ValueError):
             observation_date("GoldPrice", "2026-11-24 09:00:00")
+
+    def test_dated_market_members_preserves_transfer_and_delisting(self):
+        from scripts.r11_backer.contract_closeout import dated_market_members
+
+        change = date(2015, 1, 1)
+        stop = date(2020, 1, 1)
+        history = (
+            ("1234", "tpex", date(2010, 1, 1), change),
+            ("1234", "twse", change, stop),
+        )
+        self.assertEqual(dated_market_members(history, date(2014, 1, 1)), {"1234": "tpex"})
+        self.assertEqual(dated_market_members(history, change), {"1234": "twse"})
+        self.assertEqual(dated_market_members(history, stop), {})
+        with self.assertRaises(ValueError):
+            dated_market_members((*history, ("1234", "twse", change, None)), change)
+
+    def test_open_ended_limit_does_not_accept_future_or_missed_days(self):
+        from scripts.r11_backer.contract_closeout import inspect_dates
+        from scripts.r11_backer.release_probes import Sample, Task
+
+        limit = Task("TaiwanStockPriceLimit", "2026-11-24", "2026-11-24", "2330", send_end=False)
+        row = {"date": "2026-11-24"}
+        next_day = {"date": "2026-11-25"}
+        self.assertEqual(
+            inspect_dates(limit, Sample("VALID_SAMPLE", rows=(row, next_day)), date(2026, 11, 25)),
+            "OPEN_ENDED_RESPONSE_VERIFIED",
+        )
+        self.assertEqual(
+            inspect_dates(limit, Sample("VALID_SAMPLE", rows=(row, next_day)), date(2026, 11, 24)),
+            "HOLD_OUTSIDE_WINDOW",
+        )
+        self.assertEqual(
+            inspect_dates(limit, Sample("VALID_SAMPLE", rows=(next_day,)), date(2026, 11, 25)),
+            "HOLD_OUTSIDE_WINDOW",
+        )
+
+    def test_gold_daily_civil_date_disallows_multiple_same_day_observations(self):
+        from scripts.r11_backer.contract_closeout import inspect_dates
+        from scripts.r11_backer.release_probes import Sample, Task
+
+        task = Task("GoldPrice", "2026-10-01", "2026-10-03")
+        first = {"date": "2026-10-01 17:00:00+00:00"}
+        second = {"date": "2026-10-02 17:00:00+00:00"}
+        check = lambda rows: inspect_dates(task, Sample("VALID_SAMPLE", rows=rows), date(2026, 11, 25))
+        self.assertEqual(check((first, second)), "VALID_SAMPLE")
+        self.assertEqual(check((first, first)), "HOLD_MULTIPLE_RECORDS_PER_SOURCE_DAY")
