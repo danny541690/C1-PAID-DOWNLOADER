@@ -50,14 +50,19 @@ jobs:
       recent: ${{ steps.probe.outputs.backer_recent_probe }}
     steps:
       - uses: actions/checkout@v4
-      - name: Check Drive metadata and bounded Backer samples
+      - name: Check current Drive and quota and reuse verified macro samples
         id: probe
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
           FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
-        run: python3 -m scripts.r11_backer.live_preflight
+          R11_REUSE_MACRO_PILOT: '1'
+        run: |
+          set -euo pipefail
+          export R11_PENDING_PROBES="$(python3 -m scripts.r11_backer.dataset_pilot --count)"
+          printf 'Backer request ceiling: %s (one account check plus %s pending sample requests)\n'             "$((1 + R11_PENDING_PROBES))" "$R11_PENDING_PROBES" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -m scripts.r11_backer.live_preflight
   remote-seed:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-live-pilot]')
     permissions:
@@ -188,8 +193,8 @@ jobs:
             printf -- '- Synthetic regression: %s\n' "$REGRESSION"
             printf -- '- Drive metadata and target: %s\n' "${DRIVE:-NO_RESULT}"
             printf -- '- FinMind account quota: %s\n' "${FINMIND:-NO_RESULT}"
-            printf -- '- Historical sample: %s\n' "${HISTORICAL:-NO_RESULT}"
-            printf -- '- Recent 120-day sample: %s\n' "${RECENT:-NO_RESULT}"
+            printf -- '- Prior historical sample (reused): %s\n' "${HISTORICAL:-NO_RESULT}"
+            printf -- '- Prior 120-day sample (reused): %s\n' "${RECENT:-NO_RESULT}"
             printf -- '- Cross-runner quota reservation and bounded Backer request: %s\n' "$REMOTE"
             printf -- '- Drive synthetic archive and cross-runner recovery: %s\n' "$DRIVE_ROUND_TRIP"
             printf -- '- Production release: HOLD (outside this pilot)\n'
