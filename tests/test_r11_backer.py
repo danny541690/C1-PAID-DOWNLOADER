@@ -237,3 +237,65 @@ class DatasetPilotTests(unittest.TestCase):
         early = next(spec for spec in combined if spec[3] == "1991-10-01")
         self.assertEqual(early[:3], ("TaiwanStockFinancialStatements", "2330", "stock_id"))
         self.assertIn("origin_name", early[-1])
+
+
+class ReleaseSweepTests(unittest.TestCase):
+    def test_documented_contract_read_and_broker_tier_guard(self):
+        from scripts.r11_backer.release_probes import contracts
+
+        document = (
+            "### Daily\n- **Endpoint:** `/api/v4/data`\n- **Tier:** Backer\n"
+            "- **Required:** `dataset=Daily`, `start_date`\n"
+            "- **Optional:** `end_date`\n- **Key columns:** date, value\n"
+            "### Broker\n- **Endpoint:** `/api/v4/separate`\n- **Tier:** Sponsor\n"
+        )
+        result = contracts(document)
+        self.assertEqual(tuple(result), ("Daily",))
+        self.assertEqual(result["Daily"].fields, ("date", "value"))
+        self.assertEqual(result["Daily"].tier, "Backer")
+
+    def test_closed_days_exclude_current_and_future(self):
+        from scripts.r11_backer.release_probes import Sample, recent_trading_days
+
+        calendar = Sample("VALID_SAMPLE", rows=(
+            {"date": "2026-11-24"}, {"date": "2026-11-25"},
+            {"date": "2026-11-26"}, {"date": "not a date"},
+        ))
+        self.assertEqual(recent_trading_days(calendar, date(2026, 11, 25)), ["2026-11-24"])
+
+    def test_market_batch_must_preserve_reference_rows(self):
+        from scripts.r11_backer.release_probes import Sample, compare_market
+
+        row = {"stock_id": "2330", "close": 10}
+        single = Sample("VALID_SAMPLE", rows=(row,))
+        market = Sample("VALID_SAMPLE", rows=(row, {"stock_id": "2317", "close": 1}))
+        self.assertTrue(compare_market(single, market))
+        self.assertFalse(compare_market(single, Sample("VALID_SAMPLE", rows=(row,))))
+        self.assertFalse(compare_market(
+            single, Sample("VALID_SAMPLE", rows=(row | {"close": 11}, market.rows[1])),
+        ))
+        self.assertFalse(compare_market(
+            single, Sample("VALID_SAMPLE", rows=(row, row, market.rows[1])),
+        ))
+
+    def test_bond_identity_requires_effective_dates(self):
+        from scripts.r11_backer.release_probes import Sample, active_bond
+
+        base = {"cb_id": "17172", "InitialDateOfConversion": "2025-10-01"}
+        candidates = Sample("VALID_SAMPLE", rows=(
+            base | {"DueDateOfConversion": "2026-10-31"},
+            base | {"cb_id": "17173", "DueDateOfConversion": "2027-01-01"},
+        ))
+        self.assertEqual(active_bond(candidates, "2026-11-02", "2026-11-07"), "17173")
+        self.assertIsNone(active_bond(candidates, "2027-03-01", "2027-03-01"))
+
+    def test_release_report_does_not_promote_unproven_requirements(self):
+        from scripts.r11_backer.acceptance_report import evaluate
+
+        rows = evaluate({"dataset_sweep_complete": True}, recovery=True, private=True)
+        self.assertEqual(len({row["id"] for row in rows}), 76)
+        statuses = {row["id"]: row["status"] for row in rows}
+        self.assertEqual(statuses["R10.1-P18"], "HOLD")
+        self.assertEqual(statuses["R11-T14"], "HOLD")
+        self.assertEqual(statuses["R11-T01"], "HOLD")
+        self.assertEqual(statuses["R11-T15"], "PASS_PILOT")

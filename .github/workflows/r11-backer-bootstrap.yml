@@ -39,7 +39,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   live-read-only-preflight:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-live-pilot]')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-live-pilot]') || contains(github.event.head_commit.message, '[r11-full-preflight]'))
     runs-on: ubuntu-latest
     timeout-minutes: 4
     outputs:
@@ -58,13 +58,18 @@ jobs:
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
           FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
           R11_REUSE_MACRO_PILOT: '1'
+          R11_FULL_PREFLIGHT: ${{ contains(github.event.head_commit.message, '[r11-full-preflight]') }}
         run: |
           set -euo pipefail
           export R11_PENDING_PROBES="$(python3 -m scripts.r11_backer.dataset_pilot --count)"
+          if [[ "$R11_FULL_PREFLIGHT" == true ]]; then
+            sweep_plan=$(python3 -c 'from scripts.r11_backer.preflight import read_catalog; from scripts.r11_backer.release_probes import BULK_CANDIDATES; print(sum(r["routing"].startswith("B") for r in read_catalog()) + 10 * len(BULK_CANDIDATES) + 2)')
+            export R11_PENDING_PROBES="$((R11_PENDING_PROBES + sweep_plan))"
+          fi
           printf 'Backer request ceiling: %s (one account check plus %s pending sample requests)\n'             "$((1 + R11_PENDING_PROBES))" "$R11_PENDING_PROBES" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 -m scripts.r11_backer.live_preflight
   remote-seed:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-live-pilot]')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-live-pilot]') || contains(github.event.head_commit.message, '[r11-full-preflight]'))
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -163,14 +168,77 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: bash scripts/r11_backer/recovery_pilot.sh
+  release-sweep:
+    needs: live-read-only-preflight
+    if: needs.live-read-only-preflight.outputs.pilot == 'PASS' && contains(github.event.head_commit.message, '[r11-full-preflight]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      archive: ${{ steps.result.outputs.archive }}
+      completed: ${{ steps.result.outputs.completed }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sweep Backer contracts and benchmark five closed sessions
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_probes
+      - name: Read back the sanitized release sweep outputs
+        id: result
+        run: |
+          printf 'archive=%s\n' "$(jq -er .archive r11-release-probes.json)" >> "$GITHUB_OUTPUT"
+          printf 'completed=%s\n' "$(jq -r .dataset_sweep_complete r11-release-probes.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r11-release-probes-${{ github.run_attempt }}
+          path: r11-release-probes.json
+          if-no-files-found: error
+          retention-days: 30
+  paid-archive-readback:
+    needs: release-sweep
+    if: needs.release-sweep.outputs.archive == 'STAGED_PRIVATE_SAMPLES'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify paid originals in private Drive on a separate runner
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_probes --verify-only
   pilot-verdict:
-    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-live-pilot]')
-    needs: [synthetic-checks, public-catalog, live-read-only-preflight, remote-claim, drive-round-trip]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-live-pilot]') || contains(github.event.head_commit.message, '[r11-full-preflight]'))
+    needs: [synthetic-checks, public-catalog, live-read-only-preflight, remote-claim, drive-round-trip, release-sweep, paid-archive-readback]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
+      - uses: actions/checkout@v4
+        if: contains(github.event.head_commit.message, '[r11-full-preflight]')
+      - uses: actions/download-artifact@v4
+        if: contains(github.event.head_commit.message, '[r11-full-preflight]') && needs.release-sweep.result == 'success'
+        with:
+          name: r11-release-probes-${{ github.run_attempt }}
+      - name: Reconcile the complete release test register
+        if: contains(github.event.head_commit.message, '[r11-full-preflight]')
+        env:
+          DRIVE_ROUND_TRIP: ${{ needs.drive-round-trip.result }}
+          PRIVATE_READBACK: ${{ needs.paid-archive-readback.result }}
+        run: python3 -m scripts.r11_backer.acceptance_report
+      - uses: actions/upload-artifact@v4
+        if: contains(github.event.head_commit.message, '[r11-full-preflight]')
+        with:
+          name: r11-release-acceptance-${{ github.run_attempt }}
+          path: r11-release-acceptance.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Publish consolidated pilot verdict
         env:
+          FULL_RUN: ${{ contains(github.event.head_commit.message, '[r11-full-preflight]') }}
+          SWEEP_COMPLETE: ${{ needs.release-sweep.outputs.completed }}
+          PRIVATE: ${{ needs.paid-archive-readback.result }}
           CATALOG: ${{ needs.public-catalog.result }}
           REGRESSION: ${{ needs.synthetic-checks.result }}
           LIVE_JOB: ${{ needs.live-read-only-preflight.result }}
@@ -185,6 +253,9 @@ jobs:
           verdict=HOLD
           if [[ "$REGRESSION" == success && "$CATALOG" == success && "$LIVE_JOB" == success && "$LIVE_PILOT" == PASS && "$REMOTE" == success && "$DRIVE_ROUND_TRIP" == success ]]; then
             verdict=PASS
+          fi
+          if [[ "$FULL_RUN" == true && ( "$SWEEP_COMPLETE" != true || "$PRIVATE" != success ) ]]; then
+            verdict=HOLD
           fi
           {
             printf '## Backer pre-release pilot\n\n'
