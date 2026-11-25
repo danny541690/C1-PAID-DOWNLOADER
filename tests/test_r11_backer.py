@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from scripts.r11_backer.archive import archive_plan, compress_original
+from scripts.r11_backer.live_preflight import validate_month_sample
 from scripts.r11_backer.preflight import GATES, SLOTS, read_catalog, release_holds
 
 
@@ -42,3 +43,23 @@ class BackerBootstrapTests(unittest.TestCase):
         self.assertEqual(original_sha, hashlib.sha256(raw).hexdigest())
         self.assertEqual(archived_sha, hashlib.sha256(compressed).hexdigest())
         self.assertEqual(compress_original(raw)[0], compressed)
+
+    def test_backer_sample_requires_contract_fields_and_requested_dates(self):
+        start, end = date(1982, 1, 1), date(1982, 1, 31)
+        row = dict(date="1982-01-01", leading=1, coincident=2, lagging=3, monitoring=4)
+        self.assertEqual(
+            validate_month_sample({"status": 200, "data": [row]}, start, end),
+            "VALID_MONTH_SAMPLE",
+        )
+        for patch, expected in (
+            ({"date": "1900-01-01"}, "OUTSIDE_REQUESTED_WINDOW"),
+            ({"date": None}, "DATE_UNVERIFIED"),
+        ):
+            self.assertEqual(
+                validate_month_sample({"status": 200, "data": [row | patch]}, start, end),
+                expected,
+            )
+        self.assertEqual(
+            validate_month_sample({"status": 200, "data": []}, start, end),
+            "EMPTY_WINDOW",
+        )

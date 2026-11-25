@@ -1,7 +1,10 @@
 """Read-only runner checks. Public logs receive fixed status labels only."""
 
+from datetime import date, datetime, timedelta
 import json
 import os
+from urllib.error import HTTPError
+from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -38,13 +41,16 @@ def drive_status():
         return "CAPACITY_UNVERIFIED"
     if int(quota["limit"]) <= int(quota["usage"]):
         return "NO_AVAILABLE_CAPACITY"
-    root = os.environ.get("R11_EXPECTED_ROOT")
-    bronze = os.environ.get("R11_EXPECTED_BRONZE")
-    if not root or not bronze or not all(
-        value.isascii() and value.replace("-", "").replace("_", "").isalnum()
-        for value in (root, bronze)
+    # Canonical IDs are already used by this repository's Drive preflight.
+    root = "1FzqFPBOKQH2mk324dZAtG7D5z_hGdwoa"
+    bronze = "13DY2S3TuC4KYr8JKiptzUeXG9xZyIzam"
+    project = read_json(f"{base}/files/{root}?fields=name%2CmimeType%2Ctrashed", token)
+    if (
+        project.get("name") != "C1_0.98"
+        or project.get("mimeType") != "application/vnd.google-apps.folder"
+        or project.get("trashed") is not False
     ):
-        return "POSITIVE_CAPACITY_FOLDER_CONFIGURATION_MISSING_OR_INVALID"
+        return "PROJECT_IDENTITY_UNVERIFIED"
     folder = read_json(
         f"{base}/files/{bronze}?fields=parents%2Cname%2CmimeType%2Ctrashed%2Ccapabilities(canAddChildren)",
         token,
@@ -72,18 +78,73 @@ def finmind_status():
         return "USAGE_UNVERIFIED"
     if limit < 1600:
         return "LIMIT_BELOW_BACKER_REFERENCE"
-    if used >= limit:
+    if limit - used < 2:
         return "NO_ACCOUNT_HEADROOM"
     return "ACCOUNT_HEADROOM_OBSERVED"
 
 
+def validate_month_sample(payload, start, end):
+    if type(payload.get("status")) is not int or payload["status"] != 200:
+        return "API_REJECTED"
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        return "UNEXPECTED_RESPONSE"
+    if not rows:
+        return "EMPTY_WINDOW"
+    required = {"date", "leading", "coincident", "lagging", "monitoring"}
+    for row in rows:
+        if not isinstance(row, dict) or not required <= row.keys():
+            return "SCHEMA_UNVERIFIED"
+        try:
+            observed = date.fromisoformat(row["date"])
+        except (ValueError, TypeError):
+            return "DATE_UNVERIFIED"
+        if not start <= observed <= end:
+            return "OUTSIDE_REQUESTED_WINDOW"
+    return "VALID_MONTH_SAMPLE"
+
+
+def probe_business_indicator(start, end):
+    params = urlencode({
+        "dataset": "TaiwanBusinessIndicator",
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+    })
+    try:
+        payload = read_json(
+            f"https://api.finmindtrade.com/api/v4/data?{params}",
+            os.environ["FINMIND_BACKER_TOKEN"],
+        )
+        return validate_month_sample(payload, start, end)
+    except HTTPError as error:
+        if error.code == 429:
+            return "RATE_LIMITED"
+        if error.code in (401, 403):
+            return "ACCESS_DENIED"
+        return "HTTP_ERROR"
+    except Exception:
+        return "CHECK_FAILED"
+
+
 def main():
+    statuses = {}
     for provider, check in (("drive", drive_status), ("finmind", finmind_status)):
         try:
             status = check()
         except Exception:
             status = "CHECK_FAILED"
+        statuses[provider] = status
         print(f"{provider}={status}")
+    if statuses["finmind"] == "ACCOUNT_HEADROOM_OBSERVED":
+        historic = probe_business_indicator(date(1982, 1, 1), date(1982, 1, 31))
+        print(f"backer_historical_probe={historic}")
+        if historic in ("VALID_MONTH_SAMPLE", "EMPTY_WINDOW"):
+            today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+            last_complete_month = today.replace(day=1) - timedelta(days=1)
+            recent = probe_business_indicator(
+                last_complete_month.replace(day=1), last_complete_month
+            )
+            print(f"backer_recent_probe={recent}")
     print("production=HOLD")
 
 

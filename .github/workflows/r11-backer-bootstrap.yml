@@ -36,6 +36,4 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
           FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
-          R11_EXPECTED_ROOT: ${{ vars.R11_EXPECTED_ROOT || '' }}
-          R11_EXPECTED_BRONZE: ${{ vars.R11_EXPECTED_BRONZE || '' }}
         run: python3 -m scripts.r11_backer.live_preflight
