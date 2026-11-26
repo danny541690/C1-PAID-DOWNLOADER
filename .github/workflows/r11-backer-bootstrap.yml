@@ -909,7 +909,11 @@ jobs:
         run: python3 -m scripts.r11_backer.manifest_pilot --verify-only
   integration-b00:
     name: B00 freeze combined test manifest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-integration-test]')
+    if: >-
+      github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
+      github.ref == 'refs/heads/codex/r11-1-backer-preflight' &&
+      (contains(github.event.head_commit.message, '[r11-integration-test]') ||
+       contains(github.event.head_commit.message, '[r11-final-preflight]'))
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -987,6 +991,56 @@ jobs:
         with:
           name: r11-integration-verdict-${{ github.run_attempt }}
           path: r11-integration-verdict.json
+          if-no-files-found: error
+          retention-days: 30
+  final-source-probes:
+    name: Test Backer historic, middle and recent source windows together
+    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-final-preflight]')
+    needs: [synthetic-checks, public-catalog]
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run bounded sample windows and verify private Drive ZIP uploads
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.final_source_probes
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-final-source-probes-${{ github.run_attempt }}
+          path: r11-final-source-probes.json
+          if-no-files-found: error
+          retention-days: 30
+  final-preflight:
+    name: Reconcile all pre-release checks and replay a real archive
+    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-final-preflight]')
+    needs: [integration-b10, final-source-probes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: r11-integration-verdict-${{ github.run_attempt }}
+      - name: Test real Drive collisions and archived source and gate coverage
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.final_preflight
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-final-preflight-${{ github.run_attempt }}
+          path: r11-final-preflight.json
           if-no-files-found: error
           retention-days: 30
   paid-archive-readback:
@@ -1131,6 +1185,8 @@ jobs:
       - integration-workers
       - integration-b09
       - integration-b10
+      - final-source-probes
+      - final-preflight
       - paid-archive-readback
       - pilot-verdict
       - backfill-test-history

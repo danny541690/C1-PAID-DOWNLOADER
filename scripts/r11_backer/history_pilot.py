@@ -330,7 +330,7 @@ def storage_and_stage(sample, indexed, calendar):
                       "indexed_months": len(manifest["newest_first_month_offsets"])}
 
 
-def verified_history_archive(access, root):
+def read_verified_history_archive(access, root):
     receipt_id = ensure(root, RECEIPT_FILE, "application/json", access, create=False)
     receipt = json.loads(read_private_file(receipt_id, access))
     manifest = receipt["manifest"]
@@ -346,10 +346,14 @@ def verified_history_archive(access, root):
     expected = raw_month_manifest(business_rows(json.loads(raw)["data"]))
     if expected != manifest or sha(canonical_json(expected)) != receipt["manifest_sha256"]:
         raise ValueError("independent month index/digest mismatch")
-    return {"indexed_months": len(expected["newest_first_month_offsets"]),
-            "manifest_sha256": receipt["manifest_sha256"],
-            "compressed_bytes": len(compressed), "raw_sha256": receipt["raw_sha256"],
-            "gzip_sha256": receipt["gzip_sha256"]}
+    return receipt, raw, compressed
+
+
+def verified_history_archive(access, root):
+    receipt, _, _ = read_verified_history_archive(access, root)
+    return {"indexed_months": len(receipt["manifest"]["newest_first_month_offsets"]),
+            "manifest_sha256": receipt["manifest_sha256"], "compressed_bytes": receipt["compressed_bytes"],
+            "raw_sha256": receipt["raw_sha256"], "gzip_sha256": receipt["gzip_sha256"]}
 
 
 def verify_readback():

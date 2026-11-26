@@ -128,7 +128,7 @@ def observation_date(dataset, value):
         return timestamp.date()
 
 
-def request_sample(task, contract, auth, *, max_bytes=MAX_BYTES, inspect_dates=False):
+def request_sample(task, contract, auth, *, max_bytes=MAX_BYTES, inspect_dates=False, retain_empty=False):
     started = monotonic()
     url = "https://api.finmindtrade.com/api/v4/data?" + urlencode(task.parameters())
     req = Request(url, headers={
@@ -168,7 +168,7 @@ def request_sample(task, contract, auth, *, max_bytes=MAX_BYTES, inspect_dates=F
     if not isinstance(rows, list):
         return Sample("INVALID_RESPONSE", monotonic() - started)
     if not rows:
-        return Sample("EMPTY_WINDOW", monotonic() - started)
+        return Sample("EMPTY_WINDOW", monotonic() - started, raw if retain_empty else b"")
     if not all(isinstance(row, dict) for row in rows):
         return Sample("INVALID_RESPONSE", monotonic() - started)
 
