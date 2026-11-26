@@ -6,6 +6,7 @@ on:
       - .github/workflows/r12-1-download-preflight.yml
       - scripts/r11_backer/bounded_schedule.py
       - scripts/r11_backer/live_recovery_canary.py
+      - scripts/r11_backer/release_probes.py
 permissions:
   contents: read
 concurrency:
@@ -190,10 +191,23 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.live_recovery_canary accept
+  cross-run-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read back the accepted baseline from a separate workflow run
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.live_recovery_canary accept --prior-run 45785919941
   gate:
     runs-on: ubuntu-latest
     if: always()
-    needs: [catalog-delta, bronze-canary, schedule-regression, live-recovery-accept]
+    needs: [catalog-delta, bronze-canary, schedule-regression, live-recovery-accept, cross-run-replay]
     steps:
       - run: |
           echo "Catalog: ${{ needs.catalog-delta.result }}"
@@ -205,3 +219,4 @@ jobs:
           test "${{ needs.catalog-delta.result }}" = success
           test "${{ needs.bronze-canary.result }}" = success
           test "${{ needs.live-recovery-accept.result }}" = success
+          test "${{ needs.cross-run-replay.result }}" = success

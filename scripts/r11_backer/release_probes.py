@@ -349,7 +349,7 @@ def blast_summary(benchmark_results, days):
     return report
 
 
-def recovery_location(access, *, prefix="R11_RELEASE_PREFLIGHT"):
+def recovery_location(access, *, prefix="R11_RELEASE_PREFLIGHT", run_id=None, attempt=None):
     project = read_json(f"{BASE}/files/{ROOT}?fields=shared", access)
     recovery = read_json(
         f"{BASE}/files/{RECOVERY_ROOT}?fields=id,name,parents,shared,mimeType,trashed", access
@@ -361,8 +361,8 @@ def recovery_location(access, *, prefix="R11_RELEASE_PREFLIGHT"):
         or recovery.get("trashed") is not False or recovery.get("shared") is not False
     ):
         raise ValueError("private recovery location is not verified")
-    run_id = int(os.environ["GITHUB_RUN_ID"])
-    attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+    run_id = int(os.environ["GITHUB_RUN_ID"] if run_id is None else run_id)
+    attempt = int(os.environ["GITHUB_RUN_ATTEMPT"] if attempt is None else attempt)
     return f"{prefix}_{run_id}_{attempt}"
 
 
