@@ -852,6 +852,36 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.combined_preflight --verify-only
+  release-readiness:
+    name: Combine Backer scope, historical contracts, storage and release gates
+    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-release-readiness]')
+    needs: [synthetic-checks, public-catalog]
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify private evidence and run the combined Backer comparisons
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_readiness
+      - name: Reproduce the measurements from Drive without API probes
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_readiness --verify-only
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-release-readiness-${{ github.run_attempt }}
+          path: r11-release-readiness.json
+          if-no-files-found: error
+          retention-days: 30
   manifest-preview:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
     runs-on: ubuntu-latest
@@ -1094,6 +1124,7 @@ jobs:
       - tpex-2001-followup
       - combined-acceptance
       - combined-acceptance-readback
+      - release-readiness
       - manifest-preview
       - manifest-readback
       - integration-b00
