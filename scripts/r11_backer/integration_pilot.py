@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 
 from .archive import archive_plan, compress_original
 from .dispatch import Window, assignments
-from .drive_pilot import BASE, FOLDER, ensure, token
+from .drive_pilot import BASE, FOLDER, ensure, find, token
 from .live_preflight import read_json
 from .manifest_pilot import serial_window
 from .pilot_ledger import PilotFailure, PilotLedger, require
