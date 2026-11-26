@@ -119,7 +119,8 @@ def evidence_summary(receipts, history_bytes, monthly, drive, history_run):
         raise ValueError("actual Backer original does not match the historic coverage report")
     if pit["revenue_pit"]["status"] != "PASS_PIT_PUBLICATION_DATE_SAMPLE":
         raise ValueError("archived monthly publication test has no verified evidence")
-    history = validated_pending_history(json.loads(history_bytes))
+    historical_report = json.loads(history_bytes)
+    history = validated_pending_history(historical_report)
     rows = sample_data()
     roster = dict(Counter(row["state"] for row in rows))
     case_holds = [row["id"] for row in cases if row["status"] in {"HOLD", "PARTIAL"}]
@@ -135,6 +136,12 @@ def evidence_summary(receipts, history_bytes, monthly, drive, history_run):
         "reused_acceptance_cases": len(cases), "baseline_acceptance_statuses": crosswalk,
         "verified_test_artifacts": len(receipts), "pilot_workstreams_verified": integration["workstreams"],
     }
+    if "verified_transfer_listing_rows" in historical_report:
+        summarized["historical_2001"] = {
+            "transfer_listings_verified": historical_report["verified_transfer_listing_rows"],
+            "cross_year_quotes_verified": historical_report["cross_year_cases_with_both_quotes"],
+            "cutover_session": historical_report["first_trading_session_at_cutover"],
+        }
     private = {
         "prior_test_sources": {label: pair[1] for label, pair in receipts.items()},
         "history_ledger_sha256": digest(history_bytes), "history_ledger": history,
@@ -154,17 +161,22 @@ def evidence_summary(receipts, history_bytes, monthly, drive, history_run):
     return summarized, private
 
 
-def run(history_run, *, verify_only):
+def run(history_run, *, verify_only, history_attempt=None):
     access = drive_token()
     expected = None
     if verify_only:
         archived = verified_archive_files(access, private_folder(access, create=False, prefix=PREFIX))
         expected = json.loads(archived["reconciliation.json"])
-        if expected["history_run"] != history_run:
-            raise ValueError("readback must use the same historical ledger")
+        if history_run is not None and expected["history_run"] != history_run:
+            raise ValueError("readback must use the same historical run")
+        if history_attempt is not None and expected.get("history_attempt", 1) != history_attempt:
+            raise ValueError("readback must use the same historical run attempt")
+        history_run, history_attempt = expected["history_run"], expected.get("history_attempt", 1)
+    history_run = history_run or INPUT_HISTORY_RUN
+    history_attempt = history_attempt or 1
     with ThreadPoolExecutor(max_workers=4) as executor:
         evidence = executor.submit(archived_reports, access)
-        history = executor.submit(earlier_evidence, history_run)
+        history = executor.submit(earlier_evidence, history_run, history_attempt)
         monthly = executor.submit(monthly_original, access)
         if expected is None:
             drive = drive_health(access) | {"measured_at_taipei": datetime.now(ZoneInfo("Asia/Taipei")).isoformat()}
@@ -173,6 +185,8 @@ def run(history_run, *, verify_only):
         summary, private = evidence_summary(evidence.result(), history.result()["reconciliation.json"],
                                             monthly.result(), drive, history_run)
     result = summary | private
+    if expected is None or "history_attempt" in expected:
+        result["history_attempt"] = history_attempt
     if expected is not None:
         if json_bytes(result) != json_bytes({key: expected[key] for key in result}):
             raise ValueError("Drive readback did not reproduce the combined release checks")
@@ -183,11 +197,12 @@ def run(history_run, *, verify_only):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--history-run", type=int, default=INPUT_HISTORY_RUN)
+    parser.add_argument("--history-run", type=int)
+    parser.add_argument("--history-attempt", type=int)
     parser.add_argument("--verify-only", action="store_true")
     args = parser.parse_args()
     try:
-        report = run(args.history_run, verify_only=args.verify_only)
+        report = run(args.history_run, verify_only=args.verify_only, history_attempt=args.history_attempt)
     except Exception as error:
         report = {"status": "HOLD_INFRASTRUCTURE", "failure_class": type(error).__name__, "production": "HOLD"}
     if not args.verify_only:

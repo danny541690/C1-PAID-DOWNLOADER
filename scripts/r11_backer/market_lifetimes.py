@@ -242,9 +242,9 @@ def fallback_receipts(raw, archived_gaps):
     return sorted(receipts.values(), key=lambda row: row["symbol"])
 
 
-def earlier_evidence(run_id=EVIDENCE_RUN):
+def earlier_evidence(run_id=EVIDENCE_RUN, attempt=1):
     access = drive_token()
-    parent = ensure(RECOVERY_ROOT, f"R11_TPEX_HISTORY_{run_id}_1", FOLDER, access, create=False)
+    parent = ensure(RECOVERY_ROOT, f"R11_TPEX_HISTORY_{run_id}_{attempt}", FOLDER, access, create=False)
     if read_json(f"{BASE}/files/{parent}?fields=shared", access).get("shared") is not False:
         raise ValueError("previous test evidence folder is shared")
     return verified_archive_files(access, parent)

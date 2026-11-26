@@ -767,10 +767,46 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.tpex_history_reconciliation --verify-only
+  tpex-2001-followup:
+    name: Verify the 2001 cutover and pending cross-year cases
+    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-2001-evidence]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the PDF reader if needed
+        run: |
+          if ! command -v pdftotext >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq poppler-utils
+          fi
+      - name: Verify official records and reproduce the result from private Drive
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.r11_backer.tpex_2001_followup
+          python3 -m scripts.r11_backer.tpex_2001_followup --verify-only
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-tpex-2001-followup-${{ github.run_attempt }}
+          path: r11-tpex-2001-followup.json
+          if-no-files-found: error
+          retention-days: 30
   combined-acceptance:
     name: Combine Backer release checks using verified private evidence
-    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-combined-acceptance-test]')
-    needs: [synthetic-checks, public-catalog]
+    if: >-
+      !cancelled() && github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
+      github.ref == 'refs/heads/codex/r11-1-backer-preflight' &&
+      needs.synthetic-checks.result == 'success' && needs.public-catalog.result == 'success' &&
+      ((contains(github.event.head_commit.message, '[r11-2001-evidence]') && needs.tpex-2001-followup.result == 'success') ||
+       (contains(github.event.head_commit.message, '[r11-combined-acceptance-test]') && needs.tpex-2001-followup.result == 'skipped'))
+    needs: [synthetic-checks, public-catalog, tpex-2001-followup]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -785,7 +821,14 @@ jobs:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-        run: python3 -m scripts.r11_backer.combined_preflight
+          R11_REPLAY_NEW_HISTORY: ${{ needs.tpex-2001-followup.result == 'success' }}
+        run: |
+          set -euo pipefail
+          if [[ "$R11_REPLAY_NEW_HISTORY" == true ]]; then
+            python3 -m scripts.r11_backer.combined_preflight --history-run "$GITHUB_RUN_ID" --history-attempt "$GITHUB_RUN_ATTEMPT"
+          else
+            python3 -m scripts.r11_backer.combined_preflight
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -1048,6 +1091,7 @@ jobs:
       - listing-crosscheck-readback
       - tpex-history-reconciliation
       - tpex-history-reconciliation-readback
+      - tpex-2001-followup
       - combined-acceptance
       - combined-acceptance-readback
       - manifest-preview
