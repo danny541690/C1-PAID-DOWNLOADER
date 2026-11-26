@@ -7,6 +7,7 @@ on:
       - scripts/r11_backer/production_preflight.py
       - scripts/r11_backer/release_rehearsal.py
       - scripts/r11_backer/cross_run_ledger.py
+      - scripts/r11_backer/live_bronze_admission.py
 permissions:
   contents: read
 concurrency:
@@ -38,7 +39,7 @@ jobs:
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.production_preflight
   rehearsal-prepare:
-    if: "!contains(github.event.head_commit.message, '[r12-cross-run]')"
+    if: "!contains(github.event.head_commit.message, '[r12-cross-run]') && !contains(github.event.head_commit.message, '[r12-live-bronze]')"
     needs: release-check
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -109,10 +110,42 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.cross_run_ledger audit
+  live-bronze-capture:
+    if: contains(github.event.head_commit.message, '[r12-live-bronze]')
+    needs: release-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reserve at most one account check and one Backer-only partition before requesting
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.live_bronze_admission capture
+  live-bronze-accept:
+    needs: live-bronze-capture
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify the formal Bronze original and replay using the saved receipt
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          python3 -m scripts.r11_backer.live_bronze_admission accept
+          python3 -m scripts.r11_backer.live_bronze_admission capture
   archive-test-run:
     name: Save Backer test history to private Drive
     if: always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER'
-    needs: [release-check, rehearsal-prepare, rehearsal-recover, rehearsal-accept, ledger-origin, ledger-acceptance]
+    needs: [release-check, rehearsal-prepare, rehearsal-recover, rehearsal-accept, ledger-origin, ledger-acceptance, live-bronze-capture, live-bronze-accept]
     permissions:
       actions: read
       contents: read

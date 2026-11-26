@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
+import json
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from scripts.r11_backer import drive_pilot
+from scripts.r11_backer import drive_pilot, live_bronze_admission
 from scripts.r11_backer.cross_run_ledger import accept, claim, initial_state
 from scripts.r11_backer.manifest_pilot import REQUIRED_PROOF, manifest_windows, sample_data
 from scripts.r11_backer.production_preflight import FOREIGN_EQUITIES, evaluate, resolve_r12_scope
@@ -78,6 +79,30 @@ class CrossRunAdmissionTests(unittest.TestCase):
         self.assertEqual(completed["tasks"]["first"]["generation"], 2)
         self.assertEqual(completed["quota"], original["quota"])
         self.assertIsNone(claim(completed, "first", 33, 3700, charge=True))
+
+
+class LiveBronzeAdmissionTests(unittest.TestCase):
+    def test_market_value_proof_rejects_missing_or_paginated_keys(self):
+        p = live_bronze_admission
+        row = {"date": p.DATE, "stock_id": p.TASK.data_id, "market_value": 100}
+        response = {"status": 200, "data": [row]}
+        self.assertEqual(p.source_proof(json.dumps(response).encode(), b"packed", row.keys())["rows"], 1)
+        for invalid in (response | {"next": "page"}, response | {"data": []},
+                        response | {"data": [row | {"stock_id": "other"}]}):
+            with self.subTest(invalid=invalid), self.assertRaises(p.RehearsalError):
+                p.source_proof(json.dumps(invalid).encode(), b"packed", row.keys())
+
+    def test_capture_does_not_repeat_a_reserved_or_accepted_request(self):
+        p = live_bronze_admission
+        with (patch.dict(p.os.environ, clear=True),
+              patch.object(p, "verified_file", return_value="existing"),
+              patch.object(p, "call_provider") as provider):
+            with self.assertRaisesRegex(p.RehearsalError, "OUTSTANDING_RESERVATION"):
+                p.capture({}, {"state": {"status": "SOURCE_RESERVED"}}, None, "fixture", 1)
+            with patch("builtins.print"):
+                p.capture({}, {"state": {"status": "VERIFIED", "receipt": {"file_id": "existing"}}},
+                          None, "fixture", 1)
+            provider.assert_not_called()
 
 
 if __name__ == "__main__":
