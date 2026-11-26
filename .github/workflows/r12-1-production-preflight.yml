@@ -10,6 +10,7 @@ on:
       - scripts/r11_backer/live_bronze_admission.py
       - scripts/r11_backer/release_batch.py
       - scripts/r11_backer/finish_preflight.py
+      - scripts/r11_backer/release_rollout.py
 permissions:
   contents: read
 concurrency:
@@ -35,6 +36,7 @@ jobs:
           print(f"negative_integrity_cases={negative_cases(fixtures()[0])}")
           PY
       - name: Read current private manifest and capacity prerequisites
+        if: ${{ !contains(github.event.head_commit.message, '[r12-rollout-gates]') }}
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -46,7 +48,8 @@ jobs:
           !contains(github.event.head_commit.message, '[r12-live-bronze]') &&
           !contains(github.event.head_commit.message, '[r12-release-batch]') &&
           !contains(github.event.head_commit.message, '[r12-finish-preflight]') &&
-          !contains(github.event.head_commit.message, '[r12-finish-readback]') }}
+          !contains(github.event.head_commit.message, '[r12-finish-readback]') &&
+          !contains(github.event.head_commit.message, '[r12-rollout-gates]') }}
     needs: release-check
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -245,10 +248,58 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.finish_preflight accept --source-run 45831567041
+  rollout-dispatch:
+    if: contains(github.event.head_commit.message, '[r12-rollout-gates]')
+    needs: release-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Freeze the private manifest and dispatch the first bounded wave
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_rollout dispatch
+  rollout-accept:
+    needs: rollout-dispatch
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    outputs:
+      resume: ${{ steps.accept.outputs.resume }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Independently accept the first wave and record the checkpoint
+        id: accept
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_rollout accept
+  rollout-resume-trigger:
+    if: needs.rollout-accept.outputs.resume == 'true'
+    needs: rollout-accept
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Queue an independent workflow from the saved private checkpoint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh workflow run finmind-backer-canary.yml --repo "$GITHUB_REPOSITORY"
+          --ref "$GITHUB_REF_NAME" -f "r12_origin=$GITHUB_RUN_ID"
   archive-test-run:
     name: Save Backer test history to private Drive
     if: always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER'
-    needs: [release-check, rehearsal-prepare, rehearsal-recover, rehearsal-accept, ledger-origin, ledger-acceptance, live-bronze-capture, live-bronze-accept, batch-dispatch, batch-accept, finish-source, finish-existing, finish-accept, finish-readback]
+    needs: [release-check, rehearsal-prepare, rehearsal-recover, rehearsal-accept, ledger-origin, ledger-acceptance, live-bronze-capture, live-bronze-accept, batch-dispatch, batch-accept, finish-source, finish-existing, finish-accept, finish-readback, rollout-dispatch, rollout-accept, rollout-resume-trigger]
     permissions:
       actions: read
       contents: read

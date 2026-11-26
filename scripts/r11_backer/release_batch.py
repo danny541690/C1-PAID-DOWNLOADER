@@ -48,15 +48,15 @@ def next_month(day):
     return (day.replace(day=28) + timedelta(days=4)).replace(day=1)
 
 
-def compile_daily(calendar, contracts, roster):
+def compile_daily(calendar, contracts, roster, *, dataset_lanes=PRICE_LANES, cutoff=CUTOFF):
     rows = []
-    for dataset, lane in PRICE_LANES.items():
+    for dataset, lane in dataset_lanes.items():
         contract = contracts[dataset]
         require(roster[dataset]["state"] == "SAMPLE_ONLY" and roster[dataset]["routing"] == lane
                 and contract.tier in {"Free(w/ data_id)", "Backer"} and "`end_date`" in contract.optional
                 and {"date", "stock_id"} <= set(contract.fields), "DAILY_SCOPE_CONTRACT")
         for month, sessions in calendar.items():
-            end = min(next_month(month) - timedelta(days=1), CUTOFF)
+            end = min(next_month(month) - timedelta(days=1), cutoff)
             days = sorted(day.isoformat() for day in sessions if month <= day <= end)
             require(bool(days), "CALENDAR_EMPTY")
             contract_id = digest(encode(asdict(contract)))
@@ -302,7 +302,7 @@ def receive(manifest, item, task, access, auth):
     return ("STAGED", proof, None)
 
 
-def dispatch(manifest, record, journal, access, run):
+def dispatch(manifest, record, journal, access, run, *, request_ceiling=None):
     health = drive_health(access)
     require(health["status"] == "POSITIVE_CAPACITY_AND_BRONZE_ACCESS" and
             health["available_bytes"] >= manifest["capacity_bound"], "BATCH_CAPACITY_CHANGED")
@@ -312,12 +312,19 @@ def dispatch(manifest, record, journal, access, run):
         record = advance(journal, record, tasks=tasks)
     if not any(task["status"] == "READY" for task in record["state"]["tasks"].values()):
         return record
+    remaining = request_ceiling
+    if remaining is not None:
+        remaining -= sum(event["kind"] == "download" and event["run"] == run for event in record["state"]["events"])
+        if remaining <= 0:
+            return record
     auth = os.environ["FINMIND_BACKER_TOKEN"]
     record = account_check(journal, record, run, auth)
     while True:
         now = int(time())
         current = record["state"]
         wave = ready_wave(manifest["items"], current, now)
+        if remaining is not None:
+            wave = wave[:remaining]
         if not wave:
             retry = min((t["retry_after"] for t in current["tasks"].values()
                          if t["status"] == "READY" and 0 < t.get("retry_after", 0) - now <= 8), default=0)
@@ -355,6 +362,10 @@ def dispatch(manifest, record, journal, access, run):
                     auth_hold |= outcome == 401
                     tasks[key] = tasks[key] | {"status": "BLOCKED", "reason": str(outcome)}
         record = advance(journal, record, tasks=tasks, pause=pause, auth_hold=auth_hold)
+        if remaining is not None:
+            remaining -= len(wave)
+            if remaining == 0:
+                return record
 
 
 def accept(manifest, record, journal, access, *, audit=False):
