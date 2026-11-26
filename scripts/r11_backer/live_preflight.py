@@ -35,12 +35,17 @@ def drive_status():
         "grant_type": "refresh_token",
     }).encode()
     token = read_json("https://oauth2.googleapis.com/token", data=data)["access_token"]
+    return drive_health(token)["status"]
+
+
+def drive_health(token):
     base = "https://www.googleapis.com/drive/v3"
     quota = read_json(f"{base}/about?fields=storageQuota(limit%2Cusage)", token)["storageQuota"]
     if "limit" not in quota or "usage" not in quota:
-        return "CAPACITY_UNVERIFIED"
-    if int(quota["limit"]) <= int(quota["usage"]):
-        return "NO_AVAILABLE_CAPACITY"
+        return {"status": "CAPACITY_UNVERIFIED", "available_bytes": None}
+    available = max(0, int(quota["limit"]) - int(quota["usage"]))
+    if not available:
+        return {"status": "NO_AVAILABLE_CAPACITY", "available_bytes": 0}
     # Canonical IDs are already used by this repository's Drive preflight.
     root = "1FzqFPBOKQH2mk324dZAtG7D5z_hGdwoa"
     bronze = "13DY2S3TuC4KYr8JKiptzUeXG9xZyIzam"
@@ -50,7 +55,7 @@ def drive_status():
         or project.get("mimeType") != "application/vnd.google-apps.folder"
         or project.get("trashed") is not False
     ):
-        return "PROJECT_IDENTITY_UNVERIFIED"
+        return {"status": "PROJECT_IDENTITY_UNVERIFIED", "available_bytes": available}
     folder = read_json(
         f"{base}/files/{bronze}?fields=parents%2Cname%2CmimeType%2Ctrashed%2Ccapabilities(canAddChildren)",
         token,
@@ -61,10 +66,10 @@ def drive_status():
         or folder.get("mimeType") != "application/vnd.google-apps.folder"
         or folder.get("trashed") is not False
     ):
-        return "FOLDER_IDENTITY_UNVERIFIED"
+        return {"status": "FOLDER_IDENTITY_UNVERIFIED", "available_bytes": available}
     if folder.get("capabilities", {}).get("canAddChildren") is not True:
-        return "BRONZE_ADD_CHILD_NOT_AVAILABLE"
-    return "POSITIVE_CAPACITY_AND_BRONZE_ACCESS"
+        return {"status": "BRONZE_ADD_CHILD_NOT_AVAILABLE", "available_bytes": available}
+    return {"status": "POSITIVE_CAPACITY_AND_BRONZE_ACCESS", "available_bytes": available}
 
 
 def finmind_status():

@@ -956,3 +956,51 @@ class TPExHistoryReconciliationTests(unittest.TestCase):
         duplicate = replace(end, issuer="丙公司")
         self.assertEqual(evaluate_case(end, [end, duplicate], [begin], [], set())[0],
                          "HOLD_CONFLICTING_OFFICIAL_EVENTS")
+
+
+class CombinedPreflightTests(unittest.TestCase):
+    def test_archived_release_report_checks_artifact_bytes_before_reuse(self):
+        from io import BytesIO
+        from zipfile import ZipFile
+
+        from scripts.r11_backer.combined_preflight import archived_report
+        from scripts.r11_backer.test_archive import json_bytes, write_snapshot
+
+        artifact = BytesIO()
+        with ZipFile(artifact, "w") as output:
+            output.writestr("pilot.json", b'{"status": "PASS"}')
+        nested_path = "artifacts/artifact-17.zip"
+        other_files = {
+            "attempt-1/jobs.json": json_bytes([{"name": "Verify pilot", "conclusion": "success", "id": 23}]),
+            "artifacts.json": json_bytes([{"name": "pilot-1", "id": 17}]),
+        }
+        register = {"run_id": 15, "outcome": "success", "attempts": [1], "unavailable_evidence": []}
+        reference = BytesIO()
+        with ZipFile(reference, "w") as output:
+            write_snapshot(output, "runs/15/", other_files | {nested_path: artifact.getvalue()}, register)
+        with ZipFile(reference) as source:
+            manifest = source.read("runs/15/evidence.json")
+            doc, proof = archived_report(source, 15, "pilot", "pilot.json", "Verify pilot")
+        self.assertEqual(doc["status"], "PASS")
+        self.assertEqual(proof["job_id"], 23)
+
+        corrupted = BytesIO()
+        with ZipFile(corrupted, "w") as output:
+            output.writestr("runs/15/evidence.json", manifest)
+            for name, body in (other_files | {nested_path: artifact.getvalue() + b"changed"}).items():
+                output.writestr("runs/15/" + name, body)
+        with ZipFile(corrupted) as source, self.assertRaises(ValueError):
+            archived_report(source, 15, "pilot", "pilot.json", "Verify pilot")
+
+    def test_pending_history_checks_unique_source_rows_and_preserves_gap(self):
+        from scripts.r11_backer.combined_preflight import validated_pending_history
+
+        rows = [{"end_source": "tpex#1", "market": "TPEx", "disposition": "HOLD_2001"}]
+        ledger = {"status": "PASS_DIAGNOSTIC", "production": "HOLD", "pending_listing_ledger": rows,
+                  "historic_intervals_pending_after": 1, "pending_by_market": {"TPEx": 1},
+                  "historical_coverage_contradiction_years": [2001]}
+        self.assertEqual(validated_pending_history(ledger), {"pending": 1, "by_market": {"TPEx": 1},
+                         "contradictory_years": [2001], "reason_counts": {"HOLD_2001": 1}})
+        with self.assertRaises(ValueError):
+            validated_pending_history(ledger | {"pending_listing_ledger": rows * 2, "pending_by_market": {"TPEx": 2},
+                                                 "historic_intervals_pending_after": 2})
