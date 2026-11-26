@@ -21,8 +21,9 @@ from .history_pilot import iso_date
 from .live_preflight import read_json
 from .release_probes import RECOVERY_ROOT
 from .test_archive import json_bytes
+from .tpex_delisting import complete_rows, delisting_url
 from .tpex_history import (
-    DELIST, EVIDENCE_RUN, GAP_DAY, close_rows, private_folder, save_private, source_bytes,
+    EVIDENCE_RUN, GAP_DAY, close_rows, private_folder, save_private, source_bytes,
     verified_archive_files,
 )
 
@@ -252,14 +253,20 @@ def earlier_evidence(run_id=EVIDENCE_RUN):
 def official_payloads(today, archived):
     urls = {"twse-listed.json": TWSE_START, "twse-ended.csv": TWSE_END}
     known = {}
+    old_urls = json.loads(archived.get("reconciliation.json", b"{}")).get("official_sources", {})
     for market, (url, _) in ACTIVE_SOURCES.items():
         urls[f"{market.lower()}-active-projection.json"] = url
     for year in range(FIRST_TPEX_TEST_YEAR, today.year + 1):
         stated = f"tpex-ended-{year}.json"
         urls[f"tpex-listed-{year}.json"] = f"{TPEX_START}?{urlencode({'date': year, 'response': 'json'})}"
-        urls[stated] = f"{DELIST}?{urlencode({'date': year, 'response': 'json'})}"
+        urls[stated] = delisting_url(year)
         if original := archived.get(f"official/termination-{year}.json"):
+            try:
+                complete_rows({0: original}, year)
+            except (ValueError, TypeError, IndexError, KeyError):
+                continue
             known[stated] = ("REUSED_VERIFIED_SOURCE", original)
+            urls[stated] = old_urls.get(f"termination-{year}.json", urls[stated])
     queue = [(name, url) for name, url in urls.items() if name not in known]
     outcomes = dict(known)
     with ThreadPoolExecutor(max_workers=6) as pool:
@@ -304,6 +311,8 @@ def run():
                     observations = twse_events(raw, today, start=is_start)
                 else:
                     year = int(name.rsplit("-", 1)[1].split(".", 1)[0])
+                    if not is_start:
+                        complete_rows({0: raw}, year)
                     observations = tpex_events(raw, year, today, start=is_start)
                 (starts if is_start else exits).extend(observations)
                 payload = raw

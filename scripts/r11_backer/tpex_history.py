@@ -26,6 +26,7 @@ from .release_gaps import BULK_MAX_BYTES
 from .release_probes import MAX_BYTES, RECOVERY_ROOT, Sample, Task, read_private_file, recovery_location, request_sample, run_parallel
 from .release_remediation import direct_close_result, pinned_contracts
 from .test_archive import confirmed_drive_zip, json_bytes
+from .tpex_delisting import complete_rows, delisting_url
 
 
 GAP_DAY = date(2010, 11, 24)
@@ -43,7 +44,6 @@ EARLY_SAMPLES = [date.fromisoformat(day) for day in (
 )]
 EARLY_HISTORY = "https://www.tpex.org.tw/zh-tw/mainboard/trading/info/mi-pricing.html"
 FACTBOOK = "https://www.tpex.org.tw/storage/publish/factbook/"
-DELIST = "https://www.tpex.org.tw/www/zh-tw/company/deListed"
 ARCHIVE = "market-identity-evidence.zip"
 REPORT = Path("r11-tpex-history.json")
 
@@ -138,13 +138,10 @@ def compare_calendar(year, yearbook, vendor):
 
 
 def termination_rows(data, year):
-    content = json.loads(data)
-    if str(content.get("date")) != str(year) or content.get("stat", "").lower() != "ok" or len(content["tables"]) != 1:
-        raise ValueError("wrong official termination year")
-    table = content["tables"][0]
-    columns = {key.strip(): pos for pos, key in enumerate(table["fields"])}
+    fields, data_rows = complete_rows({0: data}, year)
+    columns = {key.strip(): pos for pos, key in enumerate(fields)}
     result = []
-    for row in table["data"]:
+    for row in data_rows:
         code = str(row[columns["股票代號"]]).strip()
         if not re.fullmatch(r"[0-9]{4}", code):
             continue
@@ -294,7 +291,7 @@ def run():
     years = range(GAP_DAY.year, today.year + 1)
     source_urls = {name: close_url(*key) for key, name in quotes_sources.items()}
     source_urls.update({f"yearbook-{year}.xls": FACTBOOK + quote(path) for year, path in YEARBOOKS.items()})
-    source_urls.update({f"termination-{year}.json": f"{DELIST}?{urlencode({'date': year, 'response': 'json'})}" for year in years})
+    source_urls.update({f"termination-{year}.json": delisting_url(year) for year in years})
     market = Task("TaiwanStockPrice", GAP_DAY.isoformat(), GAP_DAY.isoformat())
     calendar = Task("TaiwanStockTradingDate", None, None)
     info_task = Task("TaiwanStockInfo", None, None)

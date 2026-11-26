@@ -726,6 +726,47 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.listing_crosscheck --verify-only
+  tpex-history-reconciliation:
+    name: Reconcile complete TPEx delistings with official historical listing dates
+    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-tpex-history-reconciliation]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reconcile complete annual page totals, legacy listings and delisting events
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.tpex_history_reconciliation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-tpex-history-reconciliation-${{ github.run_attempt }}
+          path: r11-tpex-history-reconciliation.json
+          if-no-files-found: error
+          retention-days: 30
+  tpex-history-reconciliation-readback:
+    name: Recompute paginated TPEx history from private Drive
+    needs: [tpex-history-reconciliation, synthetic-checks]
+    if: needs.tpex-history-reconciliation.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify private sources and reproduce the reconciliation
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.tpex_history_reconciliation --verify-only
   manifest-preview:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
     runs-on: ubuntu-latest
@@ -963,6 +1004,8 @@ jobs:
       - twse-historical-codes-readback
       - listing-crosscheck
       - listing-crosscheck-readback
+      - tpex-history-reconciliation
+      - tpex-history-reconciliation-readback
       - manifest-preview
       - manifest-readback
       - integration-b00

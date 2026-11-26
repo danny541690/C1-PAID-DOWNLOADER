@@ -620,7 +620,8 @@ class TPExHistoricalEvidenceTests(unittest.TestCase):
         empty = json.dumps({"stat": "ok", "date": "19961121", "tables": [{"data": []}]})
         self.assertEqual(close_rows(empty, date(1996, 11, 21), "TPEx"), ("EMPTY_OFFICIAL_ENDPOINT", {}, {}))
         termination = {"stat": "ok", "date": "2024", "tables": [
-            {"fields": ["股票代號", "終止上櫃日期", "終止上櫃原因"], "data": [["6446", "113-01-25", "example"]]},
+            {"fields": ["股票代號", "公司名稱", "終止上櫃日期", "終止上櫃原因"], "totalCount": 1,
+             "data": [["6446", "甲公司", "113-01-25", "example"]]},
         ]}
         self.assertEqual(termination_rows(json.dumps(termination), 2024)[0]["end"], "2024-01-25")
         with self.assertRaises(ValueError):
@@ -909,3 +910,49 @@ class OfficialListingCrosscheckTests(unittest.TestCase):
         self.assertEqual(outcomes["effective"], "2015-06-12")
         self.assertEqual(outcomes["first_managed_trade_verified_in_probe"], "2015-06-15")
         self.assertIsNone(interval)
+
+
+class TPExHistoryReconciliationTests(unittest.TestCase):
+    def test_delisting_paging_conserves_rows_and_rejects_incomplete_or_repeated_pages(self):
+        from scripts.r11_backer.test_archive import json_bytes
+        from scripts.r11_backer.tpex_delisting import PAGE_SIZE, complete_rows
+
+        fields = ["股票代號", "公司名稱", "終止上櫃日期", "終止上櫃原因"]
+        records = [[str(1000 + i), "甲公司", "91-09-16", "終止"] for i in range(PAGE_SIZE + 2)]
+        first = json_bytes({"stat": "ok", "date": "2002", "tables": [
+            {"fields": fields, "totalCount": len(records), "data": records[:PAGE_SIZE]},
+        ]})
+        rest = {"stat": "ok", "totalCount": len(records), "data": records[PAGE_SIZE:]}
+        self.assertEqual(complete_rows({0: first, PAGE_SIZE: json_bytes(rest)}, 2002), (fields, records))
+        for wrong in ({0: first}, {0: first, PAGE_SIZE: json_bytes(rest | {"data": records[:2]})},
+                      {0: first, PAGE_SIZE: json_bytes(rest | {"totalCount": len(records) + 1})}):
+            with self.assertRaises(ValueError):
+                complete_rows(wrong, 2002)
+
+    def test_yearbook_start_crossing_a_documented_delisting_gap_stays_held(self):
+        from scripts.r11_backer.market_lifetimes import Event
+        from scripts.r11_backer.tpex_history_reconciliation import evaluate_case
+
+        begin = Event("TPEx", "1234", "甲公司", date(2001, 8, 1), "audited-page")
+        end = Event("TPEx", "1234", "甲公司股份有限公司", date(2002, 5, 8), "full-page")
+        outcome, choices, proposal = evaluate_case(end, [end], [begin], [], {2001})
+        self.assertEqual(outcome, "HOLD_DELISTING_YEAR_CONTRADICTION")
+        self.assertEqual(choices, [begin])
+        self.assertIsNone(proposal)
+        decision, _, accepted = evaluate_case(end, [end], [begin], [], set())
+        self.assertEqual(decision, "PASS")
+        self.assertEqual(accepted["proof"], [begin.source, end.source])
+
+    def test_newly_observed_terminal_limits_code_reuse_and_keeps_uncertain_company_names_held(self):
+        from dataclasses import replace
+        from scripts.r11_backer.market_lifetimes import Event
+        from scripts.r11_backer.tpex_history_reconciliation import evaluate_case
+
+        begin = Event("TPEx", "1234", "甲公司", date(2002, 8, 1), "audited-page")
+        earlier = Event("TPEx", "1234", "甲公司", date(2002, 10, 1), "next-page")
+        end = Event("TPEx", "1234", "乙公司股份有限公司", date(2012, 5, 8), "full-page")
+        self.assertEqual(evaluate_case(end, [earlier, end], [begin], [], set())[0], "HOLD_LISTING_START_MISSING")
+        self.assertEqual(evaluate_case(end, [end], [begin], [], set())[0], "HOLD_ISSUER_NAME_LINK")
+        duplicate = replace(end, issuer="丙公司")
+        self.assertEqual(evaluate_case(end, [end, duplicate], [begin], [], set())[0],
+                         "HOLD_CONFLICTING_OFFICIAL_EVENTS")
