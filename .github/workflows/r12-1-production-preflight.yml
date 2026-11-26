@@ -45,7 +45,8 @@ jobs:
       ${{ !contains(github.event.head_commit.message, '[r12-cross-run]') &&
           !contains(github.event.head_commit.message, '[r12-live-bronze]') &&
           !contains(github.event.head_commit.message, '[r12-release-batch]') &&
-          !contains(github.event.head_commit.message, '[r12-finish-preflight]') }}
+          !contains(github.event.head_commit.message, '[r12-finish-preflight]') &&
+          !contains(github.event.head_commit.message, '[r12-finish-readback]') }}
     needs: release-check
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -229,10 +230,25 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.finish_preflight accept
+  finish-readback:
+    if: contains(github.event.head_commit.message, '[r12-finish-readback]')
+    needs: release-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reopen the completed source ledger and verify saved originals without FinMind access
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.finish_preflight accept --source-run 45831567041
   archive-test-run:
     name: Save Backer test history to private Drive
     if: always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER'
-    needs: [release-check, rehearsal-prepare, rehearsal-recover, rehearsal-accept, ledger-origin, ledger-acceptance, live-bronze-capture, live-bronze-accept, batch-dispatch, batch-accept, finish-source, finish-existing, finish-accept]
+    needs: [release-check, rehearsal-prepare, rehearsal-recover, rehearsal-accept, ledger-origin, ledger-acceptance, live-bronze-capture, live-bronze-accept, batch-dispatch, batch-accept, finish-source, finish-existing, finish-accept, finish-readback]
     permissions:
       actions: read
       contents: read

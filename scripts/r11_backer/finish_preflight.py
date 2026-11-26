@@ -24,7 +24,7 @@ from .manifest_pilot import sample_data
 from .quota import can_reserve, retry_deadline
 from .reconcile_catalog import BACKER_COMPATIBLE
 from .release_batch import account_check, stored_event, proof_for
-from .release_probes import MAX_BYTES, SCOPE_HOLDS, Sample, Task, contracts, observation_date
+from .release_probes import MAX_BYTES, SCOPE_HOLDS, Sample, Task, contracts, observation_date, read_private_file
 from .release_rehearsal import RehearsalError, require, root_folder
 from .tpex_history import ARCHIVE, save_private, verified_archive_files
 
@@ -431,7 +431,7 @@ def dispatch(manifest, root, journal, record, access, run):
     return record
 
 
-def accept(manifest, root, record, access, run):
+def accept(manifest, root, record, access, run, source_run):
     def packet_folder(name):
         folder = ensure(root, name, FOLDER, access, create=False)
         verify_private_folder(folder, access)
@@ -473,7 +473,8 @@ def accept(manifest, root, record, access, run):
         persisted = read_private_file(fid, access)
         require(persisted == packed and proof_for(window, persisted) == proof, "BRONZE_RECEIPT")
         accepted[key] = {"file_id": fid, "proof": proof}
-    result = summary(manifest, record, run) | {
+    result = summary(manifest, record, source_run) | {
+        "verification_finmind_requests": 0,
         "old_and_new_positive_datasets": len(set(manifest["previous_positive"]) | new_positive),
         "old_and_new_positive_lanes": sorted(set(manifest["previous_lanes"]) | lanes),
         "new_positive_datasets": len(new_positive), "source_files_read_back": len(data),
@@ -504,11 +505,16 @@ def summary(manifest, record, run):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("phase", choices=("dispatch", "accept"))
-    phase = parser.parse_args().phase
+    parser.add_argument("--source-run", type=int)
+    args = parser.parse_args()
+    phase = args.phase
+    if args.source_run is not None and (phase != "accept" or args.source_run < 1):
+        parser.error("Only readback can reopen another run's evidence")
     try:
         run = int(os.environ["GITHUB_RUN_ID"])
         access = token()
-        root = root_folder(access, prefix=PREFIX, run_id=run, attempt=1, create=phase == "dispatch")
+        source_run = args.source_run or run
+        root = root_folder(access, prefix=PREFIX, run_id=source_run, attempt=1, create=phase == "dispatch")
         journal = DriveJournal(root, access)
         manifest = prepare(root, journal, access) if phase == "dispatch" else read_json_file(root, MANIFEST, access)
         record = journal.version()
@@ -516,7 +522,7 @@ def main():
         if phase == "dispatch":
             result = summary(manifest, dispatch(manifest, root, journal, record, access, run), run)
         else:
-            result = accept(manifest, root, record, access, run)
+            result = accept(manifest, root, record, access, run, source_run)
         print(json.dumps(result, sort_keys=True))
         if phase == "accept":
             require(result["preflight"] == "COMPLETE", "PREFLIGHT_REQUESTS_PENDING")

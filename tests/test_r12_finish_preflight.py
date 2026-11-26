@@ -2,7 +2,8 @@ from datetime import date
 import unittest
 from unittest.mock import patch
 
-from scripts.r11_backer.finish_preflight import alternate, empty_confirmed, recover_wave, wave_keys
+from scripts.r11_backer.archive import compress_original
+from scripts.r11_backer.finish_preflight import accept, alternate, empty_confirmed, recover_wave, task_id, wave_keys
 from scripts.r11_backer.release_probes import Contract, Task
 
 
@@ -42,3 +43,29 @@ class RemainingPreflightTests(unittest.TestCase):
         self.assertEqual(restored["outcomes"]["known"]["status"], "EMPTY_WINDOW")
         self.assertEqual(restored["outcomes"]["missing"]["status"], "INTERRUPTED")
         self.assertEqual(restored["packets"], ["wave-000003-part-01"])
+
+    def test_formal_bronze_readback_accepts_proved_stock_calendar(self):
+        task = Task("TaiwanStockShareholding", "2026-11-23", "2026-11-23", "2330")
+        key = task_id(task)
+        raw = b'{"status":200,"data":[{"stock_id":"2330","date":"2026-11-23"}]}'
+        packed, raw_sha, packed_sha = compress_original(raw)
+        manifest = {
+            "tests": {key: {"params": task.parameters(), "end": task.end, "lane": "B03",
+                            "fields": ["date", "stock_id"], "expected_days": [task.start], "object_id": "original"}},
+            "decisions": [], "previous_rows": 0, "previous_positive": [], "previous_lanes": [],
+        }
+        record = {"state": {"events": [], "packets": [], "inflight": [], "tasks": {
+            key: {"status": "VALID_SAMPLE", "proof": {"raw_sha": raw_sha, "packed_sha": packed_sha, "rows": 1}},
+        }}}
+        base = "scripts.r11_backer.finish_preflight."
+        with (patch(base + "packets", return_value={key: raw}),
+              patch(base + "ensure", return_value="original"),
+              patch(base + "verify_private_folder"),
+              patch(base + "month_folder", return_value="month"),
+              patch(base + "write_json"),
+              patch(base + "read_private_file", return_value=packed) as read,
+              patch.dict("os.environ", {"GITHUB_RUN_ATTEMPT": "1"})):
+            result = accept(manifest, "test", record, "access", 10, 9)
+        read.assert_called_once_with("original", "access")
+        self.assertEqual(result["formal_bronze_verified"], 1)
+        self.assertEqual(result["verification_finmind_requests"], 0)
