@@ -20,7 +20,8 @@ jobs:
             contains(github.event.head_commit.message, '[r12-finish-preflight]') ||
             contains(github.event.head_commit.message, '[r12-finish-readback]') ||
             contains(github.event.head_commit.message, '[r12-rollout-gates]') ||
-            contains(github.event.head_commit.message, '[r12-rollout-archive]'))) &&
+            contains(github.event.head_commit.message, '[r12-rollout-archive]') ||
+            contains(github.event.head_commit.message, '[r12-production-schedule]'))) &&
           !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
             github.event.pull_request.head.ref == 'codex/r11-1-backer-preflight') }}
     runs-on: ubuntu-latest
@@ -39,7 +40,8 @@ jobs:
             contains(github.event.head_commit.message, '[r12-finish-preflight]') ||
             contains(github.event.head_commit.message, '[r12-finish-readback]') ||
             contains(github.event.head_commit.message, '[r12-rollout-gates]') ||
-            contains(github.event.head_commit.message, '[r12-rollout-archive]'))) &&
+            contains(github.event.head_commit.message, '[r12-rollout-archive]') ||
+            contains(github.event.head_commit.message, '[r12-production-schedule]'))) &&
           !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
             github.event.pull_request.head.ref == 'codex/r11-1-backer-preflight') }}
     runs-on: ubuntu-latest
@@ -1184,7 +1186,8 @@ jobs:
       !contains(github.event.head_commit.message, '[r12-finish-preflight]') &&
       !contains(github.event.head_commit.message, '[r12-finish-readback]') &&
       !contains(github.event.head_commit.message, '[r12-rollout-gates]') &&
-      !contains(github.event.head_commit.message, '[r12-rollout-archive]')
+      !contains(github.event.head_commit.message, '[r12-rollout-archive]') &&
+      !contains(github.event.head_commit.message, '[r12-production-schedule]')
     needs:
       - synthetic-checks
       - public-catalog

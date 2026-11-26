@@ -46,9 +46,14 @@ class DriveJournal:
         return f"master-{sequence:06d}.json"
 
     def new_id(self):
-        result = read_json(f"{BASE}/files/generateIds?count=1&space=drive", self.access)
-        file_id, = result["ids"]
-        return file_id
+        return self.new_ids(1)[0]
+
+    def new_ids(self, count):
+        require(0 < count <= 1000, "DRIVE_ID_COUNT")
+        result = read_json(f"{BASE}/files/generateIds?count={count}&space=drive", self.access)
+        ids = result["ids"]
+        require(len(ids) == count and len(set(ids)) == count, "DRIVE_IDS")
+        return ids
 
     def load(self, file_id, sequence):
         fields = "id,name,parents,shared,trashed,mimeType"
@@ -100,6 +105,31 @@ class DriveJournal:
         observed = until(lambda: self.load(fixed, sequence), "JOURNAL_WRITE_READBACK")
         require(observed["previous"] == body["previous"], "JOURNAL_WRITE_PREDECESSOR")
         return observed["state"] == state
+
+    def head(self):
+        """Open the latest private journal version without replaying old batches."""
+        query = urlencode({"q": f"'{self.parent}' in parents and trashed=false and name contains 'master-'",
+                           "orderBy": "name desc", "pageSize": 2, "fields": "incompleteSearch,files(id,name)"})
+        listing = read_json(f"{BASE}/files?{query}", self.access)
+        require(not listing.get("incompleteSearch"), "JOURNAL_LIST_INCOMPLETE")
+        if not listing["files"]:
+            return None
+        current, *predecessors = listing["files"]
+        number = int(current["name"].removeprefix("master-").removesuffix(".json"))
+        record = self.load(current["id"], number)
+        require(record is not None, "JOURNAL_HEAD_MISSING")
+        if number:
+            require(len(predecessors) == 1, "JOURNAL_PREDECESSOR_MISSING")
+            previous = self.load(predecessors[0]["id"], number - 1)
+            require(previous and previous["next_id"] == current["id"] and
+                    record["previous"] == digest(encode(previous)), "JOURNAL_PREDECESSOR")
+        else:
+            require(not predecessors and record["previous"] is None, "JOURNAL_GENESIS")
+        # A newly committed successor can be visible by ID before it appears in a list result.
+        while following := self.load(record["next_id"], record["sequence"] + 1):
+            require(following["previous"] == digest(encode(record)), "JOURNAL_PREDECESSOR")
+            record = following
+        return record
 
 
 def initial_state(manifest):

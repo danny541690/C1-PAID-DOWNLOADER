@@ -247,6 +247,8 @@ def account_check(journal, record, run, auth):
         if error.code == 429:
             pause = retry_deadline(error.headers.get("Retry-After") if error.headers else None, now)
             return advance(journal, record, pause=pause, account=None)
+        if error.code in (401, 403):
+            return advance(journal, record, auth_hold=True, account=None)
         raise
     limit, used = reply.get("api_request_limit"), reply.get("user_count")
     require(type(limit) is int and limit >= TOTAL_LIMIT and type(used) is int and 0 <= used <= limit,
@@ -256,23 +258,25 @@ def account_check(journal, record, run, auth):
                                              "first_event": len(record["state"]["events"])})
 
 
-def ready_wave(items, state, now):
+def ready_wave(items, state, now, *, worker_limit=None, lane_limit=1):
     account = state.get("account")
     if not account or state.get("auth_hold") or now < state["pause"] or not 0 <= now - account["at"] <= 150:
         return []
     remaining = account["headroom"] - (len(state["events"]) - account["first_event"])
     events = [(entry["at"], entry["kind"]) for entry in state["events"]]
-    lanes, selected = set(), []
+    lanes, selected = Counter(), []
     for row in items:
+        if len(selected) >= remaining or worker_limit is not None and len(selected) >= worker_limit:
+            break
         task = state["tasks"][row["task_id"]]
-        if (len(selected) >= remaining or row["lane"] in lanes or task["status"] != "READY"
+        if (lanes[row["lane"]] >= lane_limit or task["status"] != "READY"
                 or task.get("retry_after", 0) > now):
             continue
         if not can_reserve(events, now, "download", normal_limit=account["limit"],
                            total_limit=account["limit"], paused_until=state["pause"]):
             break
         selected.append(row)
-        lanes.add(row["lane"])
+        lanes[row["lane"]] += 1
         events.append((now, "download"))
     return selected
 
@@ -302,7 +306,7 @@ def receive(manifest, item, task, access, auth):
     return ("STAGED", proof, None)
 
 
-def dispatch(manifest, record, journal, access, run, *, request_ceiling=None):
+def dispatch(manifest, record, journal, access, run, *, request_ceiling=None, workers=None, lane_limit=1):
     health = drive_health(access)
     require(health["status"] == "POSITIVE_CAPACITY_AND_BRONZE_ACCESS" and
             health["available_bytes"] >= manifest["capacity_bound"], "BATCH_CAPACITY_CHANGED")
@@ -322,7 +326,7 @@ def dispatch(manifest, record, journal, access, run, *, request_ceiling=None):
     while True:
         now = int(time())
         current = record["state"]
-        wave = ready_wave(manifest["items"], current, now)
+        wave = ready_wave(manifest["items"], current, now, worker_limit=workers, lane_limit=lane_limit)
         if remaining is not None:
             wave = wave[:remaining]
         if not wave:
@@ -334,13 +338,13 @@ def dispatch(manifest, record, journal, access, run, *, request_ceiling=None):
             return record
         tasks = deepcopy(current["tasks"])
         events = list(current["events"])
-        for row in wave:
+        for row, stage_id in zip(wave, journal.new_ids(len(wave)), strict=True):
             key = row["task_id"]
             tasks[key] = tasks[key] | {"status": "REQUESTING", "attempts": tasks[key]["attempts"] + 1,
-                                       "stage_id": journal.new_id(), "lease_until": now + 90}
+                                       "stage_id": stage_id, "lease_until": now + 90}
             events.append(stored_event(run, "download", now, key))
         record = advance(journal, record, tasks=tasks, events=events)
-        print(f"finmind_source_requests={len(wave)} active_lanes={len(wave)}")
+        print(f"finmind_source_requests={len(wave)} active_lanes={len({row['lane'] for row in wave})}")
         pause, auth_hold = current["pause"], current.get("auth_hold", False)
         with ThreadPoolExecutor(max_workers=len(wave)) as pool:
             results = [pool.submit(receive, manifest, row, tasks[row["task_id"]], access, auth) for row in wave]
@@ -368,39 +372,51 @@ def dispatch(manifest, record, journal, access, run, *, request_ceiling=None):
                 return record
 
 
-def accept(manifest, record, journal, access, *, audit=False):
+def accept_item(manifest, item, task, parent, access):
+    if task["status"] == "VERIFIED":
+        receipt = task["receipt"]
+        file_id = ensure(parent, item["name"], "application/gzip", access, create=False,
+                         file_id=item["destination_id"])
+        verify_private_folder(file_id, access)
+        require(receipt["file_id"] == file_id and proof_for(item, read_private_file(file_id, access)) == receipt["proof"],
+                "EXISTING_RECEIPT_CHANGED")
+        return task
+    try:
+        packed, proof = stage_read(manifest, item, task, access)
+        file_id = ensure(parent, item["name"], "application/gzip", access, packed, create=True,
+                         file_id=item["destination_id"])
+        verify_private_folder(file_id, access)
+        saved = read_private_file(file_id, access)
+        require(proof_for(item, saved) == proof and saved == packed, "BRONZE_READBACK")
+        return task | {"status": "VERIFIED", "receipt": {"file_id": file_id, "proof": proof}}
+    except (RehearsalError, ValueError, RuntimeError):
+        return task | {"status": "BLOCKED", "reason": "BRONZE_VALIDATION"}
+    except OSError:
+        attempts = task.get("accept_attempts", 0) + 1
+        if attempts >= MAX_ATTEMPTS:
+            return task | {"accept_attempts": attempts, "status": "REPAIR", "reason": "BRONZE_READBACK_RETRIES"}
+        return task | {"accept_attempts": attempts, "reason": "BRONZE_RETRY_PENDING"}
+
+
+def accept(manifest, record, journal, access, *, audit=False, workers=1, reread_verified=True):
     tasks = deepcopy(record["state"]["tasks"])
-    parents = {}
+    parents, selected = {}, []
     for item in manifest["items"]:
         key = item["task_id"]
         task = tasks[key]
-        if task["status"] != "VERIFIED" and (audit or task["status"] != "STAGED"):
+        if not ((task["status"] == "VERIFIED" and reread_verified) or (task["status"] == "STAGED" and not audit)):
             continue
         month = item["start"][:7]
         if month not in parents:
             parents[month] = destination(item, access, create=False)
         parent = parents[month]
         require(parent == item["destination"], "DESTINATION_CHANGED")
-        if task["status"] == "VERIFIED":
-            receipt = task["receipt"]
-            file_id = ensure(parent, item["name"], "application/gzip", access, create=False,
-                             file_id=item["destination_id"])
-            verify_private_folder(file_id, access)
-            require(receipt["file_id"] == file_id and proof_for(item, read_private_file(file_id, access)) == receipt["proof"],
-                    "EXISTING_RECEIPT_CHANGED")
-            continue
-        try:
-            packed, proof = stage_read(manifest, item, task, access)
-            file_id = ensure(parent, item["name"], "application/gzip", access, packed, create=True,
-                             file_id=item["destination_id"])
-            verify_private_folder(file_id, access)
-            saved = read_private_file(file_id, access)
-            require(proof_for(item, saved) == proof and saved == packed, "BRONZE_READBACK")
-            tasks[key] = task | {"status": "VERIFIED", "receipt": {"file_id": file_id, "proof": proof}}
-        except (RehearsalError, ValueError, RuntimeError):
-            tasks[key] = task | {"status": "BLOCKED", "reason": "BRONZE_VALIDATION"}
-        except OSError:
-            tasks[key] = task | {"reason": "BRONZE_RETRY_PENDING"}
+        selected.append((item, task, parent))
+    if selected:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = pool.map(lambda row: accept_item(manifest, *row, access), selected)
+            for (item, _, _), result in zip(selected, results, strict=True):
+                tasks[item["task_id"]] = result
     if tasks != record["state"]["tasks"]:
         record = advance(journal, record, tasks=tasks)
     return record

@@ -18,6 +18,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   release-check:
+    if: ${{ !contains(github.event.head_commit.message, '[r12-production-schedule]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -298,7 +299,7 @@ jobs:
           --ref "$GITHUB_REF_NAME" -f "r12_origin=$GITHUB_RUN_ID"
   archive-test-run:
     name: Save Backer test history to private Drive
-    if: always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER'
+    if: always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && !contains(github.event.head_commit.message, '[r12-production-schedule]')
     needs: [release-check, rehearsal-prepare, rehearsal-recover, rehearsal-accept, ledger-origin, ledger-acceptance, live-bronze-capture, live-bronze-accept, batch-dispatch, batch-accept, finish-source, finish-existing, finish-accept, finish-readback, rollout-dispatch, rollout-accept, rollout-resume-trigger]
     permissions:
       actions: read
