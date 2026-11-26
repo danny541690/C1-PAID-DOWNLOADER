@@ -812,3 +812,24 @@ class TPExHistoricalEvidenceTests(unittest.TestCase):
         self.assertEqual(accepted, [])
         self.assertEqual([row["disposition"] for row in held],
                          ["HOLD_OFFICIAL_START_DATE_CONFLICT", "HOLD_HISTORICAL_SYMBOL_LINK"])
+
+    def test_annual_publication_code_and_effective_date_both_must_match(self):
+        from scripts.r11_backer.twse_historical_codes import reviewed_case
+
+        case = {"code": "1234", "issuer": "甲公司", "dated_name_only_start": "1998-06-29"}
+        row = {"code": "1235", "docket_issuer": "甲公司", "date": "1998-06-29"}
+        self.assertEqual(reviewed_case(case, [row])[0], "HOLD_HISTORICAL_CODE_CONFLICT")
+        self.assertEqual(reviewed_case(case, [row | {"code": "1234", "date": "1998-06-30"}])[0],
+                         "HOLD_OFFICIAL_START_DATE_CONFLICT")
+        self.assertEqual(reviewed_case(case, [row | {"code": "1234"}])[0], "PASS")
+
+    def test_official_stock_day_floor_is_separate_from_completed_date_coverage(self):
+        from scripts.r11_backer.test_archive import json_bytes
+        from scripts.r11_backer.twse_historical_codes import daily_probe_results
+
+        name = "twse-day-1234-1998-06-29.json"
+        floor = json_bytes({"stat": "查詢日期小於99年1月4日，請重新查詢!"})
+        self.assertEqual(daily_probe_results({name: floor}, {name: "official"}), {
+            name: "HOLD_OFFICIAL_DATE_FLOOR_2010_01_04",
+        })
+        self.assertEqual(daily_probe_results({}, {name: "official"}), {name: "HOLD_SOURCE_UNAVAILABLE"})
