@@ -122,7 +122,7 @@ def recovery_index(access):
         if result.get("incompleteSearch"):
             raise ArchiveError("PRIVATE_RECOVERY_INDEX_INCOMPLETE")
         for folder in result["files"]:
-            match = re.fullmatch(r"R11_[A-Z_]+_(\d+)(?:_(\d+))?", folder["name"])
+            match = re.fullmatch(r"R1[12]_[A-Z_]+_(\d+)(?:_(\d+))?", folder["name"])
             if not match:
                 continue
             if folder.get("shared") is not False:
@@ -317,7 +317,9 @@ def catch_up(github, access, parent, current_id, references):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backfill", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--backfill", action="store_true")
+    mode.add_argument("--current-only", action="store_true")
     args = parser.parse_args()
     try:
         github, access = GitHub(), drive_token()
@@ -340,7 +342,7 @@ def main():
             confirmed_drive_zip(access, folder, filename if not missing else filename.replace(".zip", "_partial.zip"), body)
             print(f"backer_attempt_archive=VERIFIED run={run_id} attempt={attempt} "
                   f"jobs={report['job_records']} artifacts={report['artifact_records']} unavailable={missing}")
-            if os.environ.get("GITHUB_EVENT_NAME") == "push":
+            if os.environ.get("GITHUB_EVENT_NAME") == "push" and not args.current_only:
                 saved, pending = catch_up(github, access, folder, run_id, references)
                 missing += pending
                 print(f"backer_archive_catchup saved={saved} unavailable={pending}")

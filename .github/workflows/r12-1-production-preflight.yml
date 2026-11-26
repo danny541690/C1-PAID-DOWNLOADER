@@ -5,6 +5,7 @@ on:
     paths:
       - .github/workflows/r12-1-production-preflight.yml
       - scripts/r11_backer/production_preflight.py
+      - scripts/r11_backer/release_rehearsal.py
 permissions:
   contents: read
 concurrency:
@@ -22,15 +23,78 @@ jobs:
         run: |
           python3 -m unittest discover -s tests
           python3 -m scripts.r11_backer.bounded_schedule
+          python3 - <<'PY'
+          from scripts.r11_backer.final_preflight import test_capacity_and_split, test_retry
+          from scripts.r11_backer.integration_pilot import fixtures, negative_cases
+          print(test_retry())
+          print(test_capacity_and_split())
+          print(f"negative_integrity_cases={negative_cases(fixtures()[0])}")
+          PY
       - name: Read current private manifest and capacity prerequisites
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.production_preflight
-      - name: Independently replay already verified real Backer originals
+  rehearsal-prepare:
+    needs: release-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: B00 freezes manifest and journals before staging archived originals
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-        run: python3 -m scripts.r11_backer.live_recovery_canary accept --prior-run 45797252783
+        run: python3 -m scripts.r11_backer.release_rehearsal prepare
+  rehearsal-recover:
+    needs: rehearsal-prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: B09 reopens the journal, rejects stale generation and repairs
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_rehearsal recover
+  rehearsal-accept:
+    needs: rehearsal-recover
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: B10 validates original bytes, complete inventory and durable receipts
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_rehearsal accept
+  archive-test-run:
+    name: Save Backer test history to private Drive
+    if: always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER'
+    needs: [release-check, rehearsal-prepare, rehearsal-recover, rehearsal-accept]
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive the current attempt and verify the private Drive readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.test_archive --current-only

@@ -3,8 +3,11 @@
 
 from email.utils import parsedate_to_datetime
 
+NORMAL_LIMIT = 1200
+TOTAL_LIMIT = 1600
 
-def can_reserve(events, now, kind, *, normal_limit=1200, total_limit=1600, paused_until=0):
+
+def can_reserve(events, now, kind, *, normal_limit=NORMAL_LIMIT, total_limit=TOTAL_LIMIT, paused_until=0):
     """Return whether one more request fits both rolling limits."""
     if now < paused_until:
         return False

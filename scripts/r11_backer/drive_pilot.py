@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import json
 import os
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, build_opener
 from uuid import uuid4
@@ -42,12 +43,15 @@ def find(parent, name, access):
     return entries[0] if entries else None
 
 
-def ensure(parent, name, mime, access, content=None, *, create):
+def ensure(parent, name, mime, access, content=None, *, create, file_id=None):
     existing = find(parent, name, access)
     if existing is None:
         if not create:
             raise RuntimeError("expected Drive child missing")
-        metadata = json.dumps({"name": name, "parents": [parent], "mimeType": mime}).encode()
+        fields = {"name": name, "parents": [parent], "mimeType": mime}
+        if file_id is not None:
+            fields["id"] = file_id
+        metadata = json.dumps(fields).encode()
         endpoint = f"{BASE}/files"
         headers = {"Content-Type": "application/json"}
         body = metadata
@@ -64,11 +68,18 @@ def ensure(parent, name, mime, access, content=None, *, create):
         req = Request(f"{endpoint}?{query}", data=body, headers={
             "Authorization": f"Bearer {access}", **headers,
         })
-        with build_opener(NoRedirect()).open(req, timeout=20) as response:
-            existing = json.load(response)
+        try:
+            with build_opener(NoRedirect()).open(req, timeout=20) as response:
+                existing = json.load(response)
+        except HTTPError as error:
+            if error.code != 409 or file_id is None:
+                raise
+            # A timed-out create may already have committed this reserved ID.
+            existing = read_json(f"{BASE}/files/{file_id}?fields={FIELDS}", access)
     if (
         existing["name"] != name or existing["mimeType"] != mime
         or existing["parents"] != [parent] or existing["trashed"]
+        or (file_id is not None and existing["id"] != file_id)
     ):
         raise RuntimeError("Drive child readback identity mismatch")
     return existing["id"]
