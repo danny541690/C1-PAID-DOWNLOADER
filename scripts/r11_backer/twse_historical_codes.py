@@ -16,10 +16,12 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
-from .drive_pilot import token as drive_token
+from .drive_pilot import BASE, FOLDER, ensure, token as drive_token
 from .history_pilot import iso_date
+from .live_preflight import read_json
 from .market_chronology import PREVIOUS_RUN as OTC_CLOSEOUT_RUN
 from .market_lifetimes import digest, earlier_evidence, name_key, nonoverlapping, twse_events
+from .release_probes import RECOVERY_ROOT
 from .test_archive import json_bytes
 from .tpex_calendar import fetch_official
 from .tpex_closeout import LIFETIME_RUN
@@ -270,11 +272,7 @@ def evaluate(inputs, responses, metadata, as_of):
     return report, details
 
 
-def run():
-    inputs = input_archives()
-    prior = json.loads(inputs[-1]["reconciliation.json"])
-    probe_urls = daily_probe_urls(prior)
-    urls = {doc.member: doc.url for doc in PUBLICATIONS} | probe_urls
+def download_responses(probe_urls):
     harvested, metadata = {}, {}
     with ThreadPoolExecutor(max_workers=5) as pool:
         for doc, (status, raw, proof) in zip(PUBLICATIONS, pool.map(fetch_publication, PUBLICATIONS), strict=True):
@@ -288,10 +286,49 @@ def run():
             harvested.update(zip(batch, values, strict=True))
             if any(status == "HOLD_OFFICIAL_HTTP_429" for status, _ in values):
                 break
-    responses = {name: raw for name, (_, raw) in harvested.items()}
+    return harvested, metadata
+
+
+def archived_responses(files):
+    ledger = json.loads(files["reconciliation.json"])
+    responses = {name.removeprefix("official/"): body for name, body in files.items() if name.startswith("official/")}
+    metadata = ledger["publication_provenance"]
+    for name, proof in metadata.items():
+        raw = responses.get(name)
+        if proof["page_sha256"] != (digest(raw) if raw else None):
+            raise ValueError("official publication page digest did not match the captured proof")
+    return responses, metadata
+
+
+def cached_input(run_id):
+    access = drive_token()
+    parent = ensure(RECOVERY_ROOT, f"R11_TWSE_CODE_INPUT_{run_id}_1", FOLDER, access, create=False)
+    if read_json(f"{BASE}/files/{parent}?fields=shared", access).get("shared") is not False:
+        raise ValueError("historical code input folder is shared")
+    return verified_archive_files(access, parent)
+
+
+def run(resume_from):
+    inputs = input_archives()
+    prior = json.loads(inputs[-1]["reconciliation.json"])
+    probe_urls = daily_probe_urls(prior)
+    urls = {doc.member: doc.url for doc in PUBLICATIONS} | probe_urls
+    if resume_from is not None:
+        staged = cached_input(resume_from)
+        responses, metadata = archived_responses(staged)
+        if responses.keys() != urls.keys():
+            raise ValueError("staged source packet does not match the current publication and probe plan")
+        harvested = {}
+        outcomes = {"REUSED_PRIVATE_DRIVE": len(responses)}
+    else:
+        harvested, metadata = download_responses(probe_urls)
+        responses = {name: raw for name, (_, raw) in harvested.items()}
+        outcomes = dict(Counter(status for status, _ in harvested.values()))
     as_of = datetime.now(ZoneInfo("Asia/Taipei")).date()
     report, details = evaluate(inputs, responses, metadata, as_of)
-    report.update(private_archive="STAGED", official_fetch_outcomes=dict(Counter(status for status, _ in harvested.values())))
+    report.update(private_archive="STAGED", official_fetch_outcomes=outcomes)
+    if resume_from is not None:
+        details.update(cached_input_run=resume_from, cached_input_ledger_sha256=digest(staged["reconciliation.json"]))
     save_private(harvested, urls, {}, report | details)
     return report
 
@@ -301,12 +338,12 @@ def verify():
     access = drive_token()
     files = verified_archive_files(access, private_folder(access, create=False))
     expected = json.loads(files["reconciliation.json"])
-    responses = {name.removeprefix("official/"): body for name, body in files.items() if name.startswith("official/")}
-    metadata = expected["publication_provenance"]
-    for name, proof in metadata.items():
-        raw = responses.get(name)
-        if proof["page_sha256"] != (digest(raw) if raw else None):
-            raise ValueError("official publication page digest did not match the captured proof")
+    sources = files
+    if cached_run := expected.get("cached_input_run"):
+        sources = cached_input(cached_run)
+        if digest(sources["reconciliation.json"]) != expected["cached_input_ledger_sha256"]:
+            raise ValueError("historical code input provenance changed after execution")
+    responses, metadata = archived_responses(sources)
     public, details = evaluate(inputs, responses, metadata, iso_date(expected["as_of_taipei"]))
     computed = public | details
     if json_bytes(computed) != json_bytes({key: expected[key] for key in computed}):
@@ -317,13 +354,15 @@ def verify():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--verify-only", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--verify-only", action="store_true")
+    mode.add_argument("--resume-from", type=int)
     args = parser.parse_args()
     try:
         if args.verify_only:
             verify()
             return 0
-        report = run()
+        report = run(args.resume_from)
     except Exception as error:
         report = {"status": "HOLD_INFRASTRUCTURE", "failure_class": type(error).__name__, "production": "HOLD"}
         if args.verify_only:

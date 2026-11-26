@@ -833,3 +833,14 @@ class TPExHistoricalEvidenceTests(unittest.TestCase):
             name: "HOLD_OFFICIAL_DATE_FLOOR_2010_01_04",
         })
         self.assertEqual(daily_probe_results({}, {name: "official"}), {name: "HOLD_SOURCE_UNAVAILABLE"})
+
+    def test_replayed_annual_report_page_must_match_staged_digest(self):
+        from scripts.r11_backer.test_archive import json_bytes
+        from scripts.r11_backer.twse_historical_codes import archived_responses
+
+        name, raw = "annual.pdf", b"audited page"
+        receipt = {"publication_provenance": {name: {"page_sha256": hashlib.sha256(raw).hexdigest()}}}
+        files = {"reconciliation.json": json_bytes(receipt), f"official/{name}": raw}
+        self.assertEqual(archived_responses(files)[0], {name: raw})
+        with self.assertRaises(ValueError):
+            archived_responses(files | {f"official/{name}": b"other page"})

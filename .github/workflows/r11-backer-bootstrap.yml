@@ -621,7 +621,7 @@ jobs:
         run: python3 -m scripts.r11_backer.market_chronology --verify-only
   twse-historical-codes:
     name: Verify historical TWSE codes from audited annual-report pages
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-twse-historical-codes]')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-twse-historical-codes]') || contains(github.event.head_commit.message, '[r11-twse-code-replay]'))
     runs-on: ubuntu-latest
     timeout-minutes: 8
     outputs:
@@ -631,6 +631,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Ensure the official PDF page extractor is available
+        if: contains(github.event.head_commit.message, '[r11-twse-historical-codes]')
         run: |
           if ! command -v pdfseparate >/dev/null; then
             sudo apt-get update -qq
@@ -642,7 +643,13 @@ jobs:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-        run: python3 -m scripts.r11_backer.twse_historical_codes
+          R11_TWSE_CODES_SOURCE_RUN: ${{ contains(github.event.head_commit.message, '[r11-twse-code-replay]') && '45732436894' || '' }}
+        run: |
+          args=()
+          if [[ -n "$R11_TWSE_CODES_SOURCE_RUN" ]]; then
+            args+=(--resume-from "$R11_TWSE_CODES_SOURCE_RUN")
+          fi
+          python3 -m scripts.r11_backer.twse_historical_codes "${args[@]}"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
