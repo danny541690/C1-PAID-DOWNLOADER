@@ -6,6 +6,10 @@ on:
         description: Private R12 rollout origin run ID for automatic continuation
         type: string
         default: ''
+      r12_archive_run:
+        description: Completed continuation run to archive without downloading data
+        type: string
+        default: ''
   push:
     paths:
       - ".github/workflows/finmind-backer-canary.yml"
@@ -17,7 +21,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   finmind-schema-canary:
-    if: inputs.r12_origin == '' && !contains(github.event.head_commit.message, '[r12-rollout-gates]')
+    if: inputs.r12_origin == '' && inputs.r12_archive_run == '' && !contains(github.event.head_commit.message, '[r12-rollout-gates]') && !contains(github.event.head_commit.message, '[r12-rollout-archive]')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -35,7 +39,7 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
   r12-resume-dispatch:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && inputs.r12_origin != ''
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && inputs.r12_origin != '' && inputs.r12_archive_run == ''
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -66,6 +70,7 @@ jobs:
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.release_rollout accept --origin "$R12_ORIGIN"
   r12-resume-archive:
+    name: Save Backer test history to private Drive
     if: always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && inputs.r12_origin != ''
     needs: [r12-resume-dispatch, r12-resume-accept]
     permissions:
@@ -79,8 +84,15 @@ jobs:
           persist-credentials: false
       - name: Archive the continuation logs and verify private Drive readback
         env:
+          R12_ORIGIN: ${{ inputs.r12_origin }}
+          R12_ARCHIVE_RUN: ${{ inputs.r12_archive_run }}
           GH_TOKEN: ${{ github.token }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-        run: python3 -m scripts.r11_backer.test_archive --current-only
+        run: |
+          if [[ -n "$R12_ARCHIVE_RUN" ]]; then
+            python3 -m scripts.r11_backer.test_archive --completed-run "$R12_ARCHIVE_RUN" --source-run "$R12_ORIGIN"
+          else
+            python3 -m scripts.r11_backer.test_archive --current-only --source-run "$R12_ORIGIN"
+          fi

@@ -122,7 +122,7 @@ def recovery_index(access):
         if result.get("incompleteSearch"):
             raise ArchiveError("PRIVATE_RECOVERY_INDEX_INCOMPLETE")
         for folder in result["files"]:
-            match = re.fullmatch(r"R1[12]_[A-Z_]+_(\d+)(?:_(\d+))?", folder["name"])
+            match = re.fullmatch(r"R1[12]_(?:1_)?[A-Z_]+_(\d+)(?:_(\d+))?", folder["name"])
             if not match:
                 continue
             if folder.get("shared") is not False:
@@ -245,12 +245,14 @@ def write_snapshot(archive, prefix, files, report):
     archive.writestr(f"{prefix}evidence.json", json_bytes(report | {"files": coverage}))
 
 
-def archive_single(github, run, attempt, references, *, current):
+def archive_single(github, run, attempt, references, *, current, source_run=None):
     payload = BytesIO()
     with ZipFile(payload, "w", ZIP_DEFLATED) as archive:
         files, report = run_snapshot(github, run, current=current, attempts=(attempt,))
         files["private-recovery-index.json"] = json_bytes([
-            item for item in references if item["run_id"] == run["id"] and item["attempt"] in {None, attempt}
+            item for item in references
+            if (item["run_id"] == run["id"] and item["attempt"] in {None, attempt})
+            or (item["run_id"] == source_run and item["attempt"] in {None, 1})
         ])
         write_snapshot(archive, "", files, report)
     return payload.getvalue(), report
@@ -320,6 +322,8 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--backfill", action="store_true")
     mode.add_argument("--current-only", action="store_true")
+    mode.add_argument("--completed-run", type=int)
+    parser.add_argument("--source-run", type=int)
     args = parser.parse_args()
     try:
         github, access = GitHub(), drive_token()
@@ -332,17 +336,21 @@ def main():
             confirmed_drive_zip(access, folder, f"R11_BACKER_History_Through_{HISTORICAL_LAST}{suffix}.zip", body)
             print(f"backer_historical_archive=VERIFIED {json.dumps(report, sort_keys=True)}")
         else:
-            run_id, attempt = (int(os.environ[key]) for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"))
+            current = args.completed_run is None
+            run_id = int(os.environ["GITHUB_RUN_ID"]) if current else args.completed_run
             run = github.json(f"/actions/runs/{run_id}")
             if run.get("head_branch") != BRANCH or (run.get("head_repository") or {}).get("full_name") != REPO:
                 raise ArchiveError("UNEXPECTED_TEST_BRANCH")
-            body, report = archive_single(github, run, attempt, references, current=True)
+            if not current and run["status"] != "completed":
+                raise ArchiveError("TEST_RUN_NOT_FINAL")
+            attempt = int(os.environ["GITHUB_RUN_ATTEMPT"]) if current else run["run_attempt"]
+            body, report = archive_single(github, run, attempt, references, current=current, source_run=args.source_run)
             missing = len(report["unavailable_evidence"])
             filename = archive_name(run_id, attempt)
             confirmed_drive_zip(access, folder, filename if not missing else filename.replace(".zip", "_partial.zip"), body)
             print(f"backer_attempt_archive=VERIFIED run={run_id} attempt={attempt} "
                   f"jobs={report['job_records']} artifacts={report['artifact_records']} unavailable={missing}")
-            if os.environ.get("GITHUB_EVENT_NAME") == "push" and not args.current_only:
+            if current and os.environ.get("GITHUB_EVENT_NAME") == "push" and not args.current_only:
                 saved, pending = catch_up(github, access, folder, run_id, references)
                 missing += pending
                 print(f"backer_archive_catchup saved={saved} unavailable={pending}")
