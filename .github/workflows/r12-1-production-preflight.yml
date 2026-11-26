@@ -1,0 +1,36 @@
+name: R12.1 consolidated production prerequisites
+on:
+  push:
+    branches: [codex/r11-1-backer-preflight]
+    paths:
+      - .github/workflows/r12-1-production-preflight.yml
+      - scripts/r11_backer/production_preflight.py
+permissions:
+  contents: read
+concurrency:
+  group: r12-1-bounded-preflight
+  cancel-in-progress: false
+jobs:
+  release-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify manifest logic, bounded dispatch and retry handoff
+        run: |
+          python3 -m unittest discover -s tests
+          python3 -m scripts.r11_backer.bounded_schedule
+      - name: Read current private manifest and capacity prerequisites
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.production_preflight
+      - name: Independently replay already verified real Backer originals
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.live_recovery_canary accept --prior-run 45797252783
