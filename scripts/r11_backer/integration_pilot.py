@@ -144,13 +144,17 @@ def verify_private_archive(item, parent, access):
     return file_id, manifest_id
 
 
-def write_archive(item, parent, access):
+def write_archive(item, parent, access, *, interrupt_before_receipt=False):
     original = sample(item)
     compressed, _, _ = compress_original(original)
     # Contract validation happens before the first Drive write.
     make_receipt(item, original, compressed, parent, "pending")
     archive, manifest = archive_names(item)
     file_id = ensure(parent, archive, "application/gzip", access, compressed, create=True)
+    if interrupt_before_receipt:
+        require(read_private_file(file_id, access) == compressed, "STAGED_BYTES_MISMATCH")
+        require(find(parent, manifest, access) is None, "INTERRUPT_RECEIPT_ALREADY_PRESENT")
+        return
     receipt, _ = make_receipt(item, original, compressed, parent, file_id)
     ensure(parent, manifest, "application/json", access, encode(receipt), create=True)
     verify_private_archive(item, parent, access)
@@ -170,7 +174,7 @@ def run_worker(ledger, item, owner):
         return
     access = token()
     parent = archive_folder(item, recovery_root(access), access, ledger, owner)
-    write_archive(item, parent, access)
+    write_archive(item, parent, access, interrupt_before_receipt=item.lane == "B01")
     require(ledger.finalize(item.task_id, owner, generation, interrupt=item.lane == "B01"), "FINALIZE")
     print("fixture_staged_for_takeover=PASS" if item.lane == "B01" else "fixture_write_and_readback=PASS")
 
@@ -186,10 +190,19 @@ def run_recovery(ledger, item):
     require(not ledger.finalize(key, staged["owner"], staged["generation"]), "STALE_LEASE_ACCEPTED")
     access = token()
     parent = archive_folder(item, recovery_root(access), access, ledger, "B09")
-    verify_private_archive(item, parent, access)
+    archive, manifest = archive_names(item)
+    require(find(parent, manifest, access) is None, "RECOVERY_RECEIPT_ALREADY_PRESENT")
+    file_id = ensure(parent, archive, "application/gzip", access, create=False)
+    original = sample(item)
+    packed, _, _ = compress_original(original)
+    require(read_private_file(file_id, access) == packed, "RECOVERY_FIXTURE_BYTES_MISMATCH")
+    receipt, _ = make_receipt(item, original, packed, parent, file_id)
+    ensure(parent, manifest, "application/json", access, encode(receipt), create=True)
+    verified_id, _ = verify_private_archive(item, parent, access)
+    require(verified_id == file_id, "RECOVERY_FILE_ID_CHANGED")
     require(ledger.finalize(key, "B09", generation), "RECOVERY_FINALIZE")
     require(not ledger.finalize(key, "B09", generation), "DUPLICATE_FINALIZE")
-    print("cross_runner_takeover_and_stale_writer_rejection=PASS")
+    print("cross_runner_missing_receipt_recovered_and_stale_writer_rejected=PASS")
 
 
 def drive_inventory(windows, root, access):

@@ -154,6 +154,7 @@ jobs:
     steps:
       - run: |
           echo "Catalog: ${{ needs.catalog-delta.result }}"
+          echo "Schedule regression: ${{ needs.schedule-regression.result }}"
           echo "Canary: ${{ needs.bronze-canary.result }}"
           echo "Production remains HOLD until persistent dispatch, complete capacity planning and restart verification pass."
           test "${{ needs.schedule-regression.result }}" = success
