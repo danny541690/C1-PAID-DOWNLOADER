@@ -5,6 +5,7 @@ on:
     paths:
       - .github/workflows/r12-1-download-preflight.yml
       - scripts/r11_backer/bounded_schedule.py
+      - scripts/r11_backer/live_recovery_canary.py
 permissions:
   contents: read
 concurrency:
@@ -147,10 +148,52 @@ jobs:
               print("R12_BOUNDED_PREFLIGHT_HOLD",type(e).__name__)
               raise SystemExit(1) from None
           PY
+  live-recovery-prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare bounded private Backer rehearsal
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 -m scripts.r11_backer.live_recovery_canary prepare
+  live-recovery-recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: live-recovery-prepare
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Recover bounded private Backer rehearsal
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.live_recovery_canary recover
+  live-recovery-accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: live-recovery-recover
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Accept bounded private Backer rehearsal
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.live_recovery_canary accept
   gate:
     runs-on: ubuntu-latest
     if: always()
-    needs: [catalog-delta, bronze-canary, schedule-regression]
+    needs: [catalog-delta, bronze-canary, schedule-regression, live-recovery-accept]
     steps:
       - run: |
           echo "Catalog: ${{ needs.catalog-delta.result }}"
@@ -161,3 +204,4 @@ jobs:
           test "${{ needs.schedule-regression.result }}" = success
           test "${{ needs.catalog-delta.result }}" = success
           test "${{ needs.bronze-canary.result }}" = success
+          test "${{ needs.live-recovery-accept.result }}" = success
