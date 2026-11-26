@@ -259,6 +259,7 @@ def wait_for_request(state):
         print(f"seconds_until_next_quota_window={due - now}", flush=True)
     while (remaining := due - int(time())) > 0:
         sleep(min(remaining, 50))
+    return due > now
 
 
 def accept_segment(folder, manifest, journal, record, master_journal, master, access, run):
@@ -318,7 +319,9 @@ def main():
             else:
                 state = record["state"]
                 if not state.get("auth_hold") and any(t["status"] in {"READY", "REQUESTING"} for t in state["tasks"].values()):
-                    wait_for_request(state)
+                    if wait_for_request(state):
+                        access = token()
+                        batch = DriveJournal(folder, access)
                     record = release_batch.dispatch(manifest, record, batch, access, run,
                                                     request_ceiling=BATCH_SIZE, workers=WORKERS, lane_limit=WORKERS)
                 state = record["state"]

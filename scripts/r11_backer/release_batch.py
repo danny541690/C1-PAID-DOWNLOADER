@@ -250,6 +250,10 @@ def account_check(journal, record, run, auth):
         if error.code in (401, 403):
             return advance(journal, record, auth_hold=True, account=None)
         raise
+    if reply.get("status") == 429:
+        return advance(journal, record, pause=retry_deadline(None, now), account=None)
+    if reply.get("status") in (401, 403):
+        return advance(journal, record, auth_hold=True, account=None)
     limit, used = reply.get("api_request_limit"), reply.get("user_count")
     require(type(limit) is int and limit >= TOTAL_LIMIT and type(used) is int and 0 <= used <= limit,
             "BACKER_ACCOUNT")
