@@ -8,6 +8,7 @@ on:
       - scripts/r11_backer/release_rehearsal.py
       - scripts/r11_backer/cross_run_ledger.py
       - scripts/r11_backer/live_bronze_admission.py
+      - scripts/r11_backer/release_batch.py
 permissions:
   contents: read
 concurrency:
@@ -39,7 +40,10 @@ jobs:
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.production_preflight
   rehearsal-prepare:
-    if: "!contains(github.event.head_commit.message, '[r12-cross-run]') && !contains(github.event.head_commit.message, '[r12-live-bronze]')"
+    if: >-
+      ${{ !contains(github.event.head_commit.message, '[r12-cross-run]') &&
+          !contains(github.event.head_commit.message, '[r12-live-bronze]') &&
+          !contains(github.event.head_commit.message, '[r12-release-batch]') }}
     needs: release-check
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -142,10 +146,46 @@ jobs:
         run: |
           python3 -m scripts.r11_backer.live_bronze_admission accept
           python3 -m scripts.r11_backer.live_bronze_admission capture
+  batch-dispatch:
+    if: contains(github.event.head_commit.message, '[r12-release-batch]')
+    needs: release-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Freeze and dispatch only evidenced windows through the shared quota ledger
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_batch dispatch
+  batch-accept:
+    needs: batch-dispatch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Independently validate the full batch and publish verified originals to Bronze
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_batch accept
+      - name: Read the final receipts again without a provider credential
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_batch audit
   archive-test-run:
     name: Save Backer test history to private Drive
     if: always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER'
-    needs: [release-check, rehearsal-prepare, rehearsal-recover, rehearsal-accept, ledger-origin, ledger-acceptance, live-bronze-capture, live-bronze-accept]
+    needs: [release-check, rehearsal-prepare, rehearsal-recover, rehearsal-accept, ledger-origin, ledger-acceptance, live-bronze-capture, live-bronze-accept, batch-dispatch, batch-accept]
     permissions:
       actions: read
       contents: read

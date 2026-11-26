@@ -72,8 +72,8 @@ def source_proof(raw, packed, fields):
             "coverage": "EXACT_SINGLE_KEY"}
 
 
-def fetch_original(auth):
-    query = urlencode(TASK.parameters())
+def fetch_original(auth, task=TASK, *, byte_limit=RAW_LIMIT):
+    query = urlencode(task.parameters())
     request = Request(f"https://api.finmindtrade.com/api/v4/data?{query}", headers={
         "Authorization": f"Bearer {auth}", "Accept": "application/json", "Accept-Encoding": "identity",
     })
@@ -83,9 +83,9 @@ def fetch_original(auth):
         encoding = response.headers.get("Content-Encoding", "identity").lower()
         if encoding == "gzip":
             with gzip.GzipFile(fileobj=response) as stream:
-                return stream.read(RAW_LIMIT + 1)
+                return stream.read(byte_limit + 1)
         require(encoding == "identity", "UNEXPECTED_ENCODING")
-        return response.read(RAW_LIMIT + 1)
+        return response.read(byte_limit + 1)
 
 
 def management_folder(access, *, create):
