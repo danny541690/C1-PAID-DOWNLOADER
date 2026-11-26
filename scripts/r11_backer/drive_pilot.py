@@ -43,8 +43,10 @@ def find(parent, name, access):
     return entries[0] if entries else None
 
 
-def ensure(parent, name, mime, access, content=None, *, create, file_id=None):
-    existing = find(parent, name, access)
+def ensure(parent, name, mime, access, content=None, *, create, file_id=None, lookup=True):
+    if not lookup and (not create or file_id is None):
+        raise ValueError("a direct create needs a reserved Drive ID")
+    existing = find(parent, name, access) if lookup else None
     if existing is None:
         if not create:
             raise RuntimeError("expected Drive child missing")

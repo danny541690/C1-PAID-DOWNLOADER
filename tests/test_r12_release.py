@@ -4,6 +4,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 from scripts.r11_backer import drive_pilot
+from scripts.r11_backer.cross_run_ledger import accept, claim, initial_state
 from scripts.r11_backer.manifest_pilot import REQUIRED_PROOF, manifest_windows, sample_data
 from scripts.r11_backer.production_preflight import FOREIGN_EQUITIES, evaluate, resolve_r12_scope
 from scripts.r11_backer.release_readiness import BOOK
@@ -61,6 +62,22 @@ class ReservedDriveIDTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "identity mismatch"):
                 drive_pilot.ensure("parent", "original.json.gz", "application/gzip", "fixture",
                                    b"raw", create=True, file_id="fixed")
+
+
+class CrossRunAdmissionTests(unittest.TestCase):
+    def test_takeover_reuses_evidence_without_charging_or_releasing_held_tasks(self):
+        manifest = {"tasks": [{"task_id": "first", "admission": "PENDING"},
+                              {"task_id": "held", "admission": "HOLD"}]}
+        original = claim(initial_state(manifest), "first", 11, 100, charge=True)
+        self.assertIsNone(claim(original, "first", 22, 129, charge=False))
+        self.assertIsNone(claim(original, "held", 22, 3700, charge=True))
+        resumed = claim(original, "first", 22, 130, charge=False)
+        self.assertIsNone(accept(resumed, "first", original["tasks"]["first"], 131, "fixture"))
+        completed = accept(resumed, "first", resumed["tasks"]["first"], 131, "fixture")
+        self.assertEqual(completed["tasks"]["first"]["status"], "VERIFIED")
+        self.assertEqual(completed["tasks"]["first"]["generation"], 2)
+        self.assertEqual(completed["quota"], original["quota"])
+        self.assertIsNone(claim(completed, "first", 33, 3700, charge=True))
 
 
 if __name__ == "__main__":

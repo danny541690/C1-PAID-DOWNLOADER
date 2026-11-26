@@ -1137,6 +1137,28 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.test_archive --backfill
+  r12-cross-run-resume:
+    name: R12.1 private ledger contention and resume
+    if: >-
+      github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' &&
+      contains(github.event.head_commit.message, '[r12-cross-run]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read the existing private quota ledger, compete and reconcile
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.cross_run_ledger resume
   archive-test-run:
     name: Save Backer test history to private Drive
     if: >-
@@ -1190,6 +1212,7 @@ jobs:
       - paid-archive-readback
       - pilot-verdict
       - backfill-test-history
+      - r12-cross-run-resume
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
