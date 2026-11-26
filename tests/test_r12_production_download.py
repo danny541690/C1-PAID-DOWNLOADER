@@ -1,10 +1,12 @@
 import json
 import unittest
+from datetime import date
 
 from scripts.r11_backer.integration_pilot import encode
-from scripts.r11_backer.production_download import candidate_windows, next_request_time, storage_bytes
+from scripts.r11_backer.production_download import candidate_windows, next_request_time, pending_group, storage_bytes
 from scripts.r11_backer.quota import TOTAL_LIMIT
 from scripts.r11_backer.release_rehearsal import RehearsalError
+from scripts.r11_backer.tpex_calendar import Source, monthly_rows
 
 
 class ProductionDownloadTests(unittest.TestCase):
@@ -44,3 +46,20 @@ class ProductionDownloadTests(unittest.TestCase):
     def test_capacity_bound_increases_at_the_next_batch(self):
         self.assertEqual(storage_bytes(0), 0)
         self.assertGreater(storage_bytes(97) - storage_bytes(96), storage_bytes(96) - storage_bytes(95))
+
+    def test_modern_tpex_calendar_preserves_historic_calendar_contract(self):
+        source = Source(date(2026, 11, 1))
+        table = {"fields": ["日期", "成交張數", "筆數", "櫃買指數"], "data": [["115/11/03", "2", "1", "200.00"]]}
+        doc = {"stat": "ok", "date": "20261101", "tables": [table]}
+        modern = monthly_rows(encode(doc), source)
+        table["fields"][1] = "成交股數（仟股）"
+        self.assertEqual(modern, monthly_rows(encode(doc), source))
+        self.assertTrue(modern[date(2026, 11, 3)]["traded"])
+
+    def test_supplement_rotates_without_discarding_the_existing_cursor(self):
+        base = {"budget": {"windows": 96}}
+        otc = {"budget": {"windows": 192}}
+        state = {"cursor": 0, "otc_cursor": 0, "next_group": "TPEX"}
+        self.assertEqual(pending_group(base, otc, state), "TPEX")
+        self.assertEqual(pending_group(base, otc, state | {"otc_cursor": 192}), "BASE")
+        self.assertIsNone(pending_group(base, otc, state | {"otc_cursor": 192, "cursor": 96}))

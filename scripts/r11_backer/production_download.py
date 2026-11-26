@@ -36,6 +36,7 @@ from .tpex_history import verified_archive_files
 CAMPAIGN = "R12_1_PRODUCTION_STOCK_2026_01"
 PLAN_VERSION = 1
 PLAN = "DATASET_MANIFEST.json"
+TPEX_PLAN = "TPEX_PRICE_MANIFEST.json"
 PREVIOUS_ROLLOUT = 45850929455
 PROBE_RUN = 45831567041
 PROBE_ACCEPT = "B10_SUMMARY_45832107974_1.json"
@@ -139,6 +140,16 @@ def available_capacity(access, window_count):
     return health["available_bytes"]
 
 
+def plan_budget(plan, access):
+    counts = Counter(dataset for dataset, *_ in candidate_windows(plan))
+    count = sum(counts.values())
+    headroom = available_capacity(access, min(count, BATCH_SIZE))
+    return {"windows": count, "windows_by_dataset": dict(counts), "base_source_requests": count,
+            "max_source_requests": count * MAX_ATTEMPTS, "storage_bound_bytes": storage_bytes(count),
+            "segment_task_limit": BATCH_SIZE, "storage_bound_fits_at_launch": headroom >= storage_bytes(count),
+            "minimum_hours_at_hourly_limit": ceil(count / TOTAL_LIMIT)}
+
+
 def freeze(access, parent, root, journal, run):
     if find(root, PLAN, access) is None:
         registry = pinned_contracts()
@@ -176,15 +187,8 @@ def freeze(access, parent, root, journal, run):
                 "held_calendar_months": held, "listing_evidence_run": LIFETIME_RUN, "listing_sha": digest(raw),
                 "catalog": [{"dataset": row["dataset"], "lane": row["routing"], "state": row["state"],
                              "admitted_venues": rules.get(row["dataset"], {}).get("venues", [])} for row in catalog]}
-        counts = Counter(dataset for dataset, *_ in candidate_windows(plan))
-        count = sum(counts.values())
-        require(count > 0, "NO_NEW_ELIGIBLE_WINDOWS")
-        headroom = available_capacity(access, min(count, BATCH_SIZE))
-        plan["budget"] = {"windows": count, "windows_by_dataset": dict(counts), "base_source_requests": count,
-                          "max_source_requests": count * MAX_ATTEMPTS,
-                          "storage_bound_bytes": storage_bytes(count), "segment_task_limit": BATCH_SIZE,
-                          "storage_bound_fits_at_launch": headroom >= storage_bytes(count),
-                          "minimum_hours_at_hourly_limit": ceil(count / TOTAL_LIMIT)}
+        plan["budget"] = plan_budget(plan, access)
+        require(plan["budget"]["windows"] > 0, "NO_NEW_ELIGIBLE_WINDOWS")
         write_json(root, "B09_SCOPE_HOLDS.json", {
             "held_calendar_months": held, "unconnected_datasets": [row for row in plan["catalog"] if
                 not row["admitted_venues"] and not row["state"].startswith("EXCLUDED")],
@@ -197,10 +201,66 @@ def freeze(access, parent, root, journal, run):
                         "totals": {}, "rows": 0, "bytes": 0, "source_requests": 0, "account_requests": 0})
 
 
-def segment(plan, master, root, access, *, create):
-    position = master["state"]["cursor"]
+def checked_otc_plan(plan, master, journal, root, access, *, create):
+    state = master["state"]
+    if "otc_plan_sha" not in state and create:
+        if find(root, TPEX_PLAN, access) is None:
+            pending = [date.fromisoformat(month) for month, venues in plan["months"].items() if "TPEx" not in venues]
+            months, held = {}, []
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                values = pool.map(lambda month: sessions("TPEx", month), pending)
+                for month, (status, dates) in zip(pending, values, strict=True):
+                    if status == "PASS" and dates:
+                        months[str(month)] = {"TPEx": dates}
+                    else:
+                        held.append({"venue": "TPEx", "month": str(month), "reason": status})
+            supplement = {"months": months, "listings": [row for row in plan["listings"] if row["market"] == "TPEx"],
+                          "contracts": {PRICE: plan["contracts"][PRICE]}, "reused": plan["reused"],
+                          "held_calendar_months": held, "base_plan_sha": state["plan_sha"]}
+            supplement["budget"] = plan_budget(supplement, access)
+            combined = plan["budget"]["storage_bound_bytes"] + supplement["budget"]["storage_bound_bytes"]
+            supplement["combined_storage_bound_fits"] = available_capacity(access, 0) >= combined
+            write_json(root, TPEX_PLAN, supplement, access)
+        supplement = read_json_file(root, TPEX_PLAN, access)
+        prior_batch = find(root, f"BATCH_{state['cursor']:06d}", access)
+        master = advance(journal, master, otc_plan_sha=digest(encode(supplement)), otc_cursor=0,
+                         next_group="BASE" if prior_batch else "TPEX")
+        state = master["state"]
+    if "otc_plan_sha" not in state:
+        return master, None
+    supplement = read_json_file(root, TPEX_PLAN, access)
+    require(supplement["base_plan_sha"] == state["plan_sha"] and
+            digest(encode(supplement)) == state["otc_plan_sha"], "TPEX_PLAN_DIGEST")
+    return master, supplement
+
+
+def pending_group(base, supplement, state):
+    groups = {"BASE": state["cursor"] < base["budget"]["windows"],
+              "TPEX": supplement is not None and state.get("otc_cursor", 0) < supplement["budget"]["windows"]}
+    preferred = state.get("next_group", "BASE")
+    if groups[preferred]:
+        return preferred
+    return next((group for group, pending in groups.items() if pending), None)
+
+
+def year_budget(base, supplement):
+    total = base["budget"].copy()
+    if supplement:
+        extra = supplement["budget"]
+        for name in ("windows", "base_source_requests", "max_source_requests", "storage_bound_bytes"):
+            total[name] += extra[name]
+        total["windows_by_dataset"] = dict(Counter(total["windows_by_dataset"]) + Counter(extra["windows_by_dataset"]))
+        total["minimum_hours_at_hourly_limit"] = ceil(total["base_source_requests"] / TOTAL_LIMIT)
+        total["storage_bound_fits_at_launch"] = supplement["combined_storage_bound_fits"]
+    return total
+
+
+def segment(plan, master, root, access, group, *, create):
+    otc = group == "TPEX"
+    position = master["state"]["otc_cursor" if otc else "cursor"]
+    plan_sha = master["state"]["otc_plan_sha" if otc else "plan_sha"]
     count = plan["budget"]["windows"]
-    name = f"BATCH_{position:06d}"
+    name = f"{'TPEX_' if otc else ''}BATCH_{position:06d}"
     folder = ensure(root, name, FOLDER, access, create=create)
     verify_private_folder(folder, access)
     journal = DriveJournal(folder, access)
@@ -225,9 +285,9 @@ def segment(plan, master, root, access, *, create):
         require(len(rows) == end - position and len({row["task_id"] for row in rows}) == len(rows), "BATCH_INVENTORY")
         write_json(folder, MANIFEST_NAME, {"items": rows, "stage": stage, "cursor": position, "end": end,
                                          "held_calendar_months": [], "capacity_bound": storage_bytes(len(rows)),
-                                         "plan_sha": master["state"]["plan_sha"]}, access)
+                                         "plan_sha": plan_sha}, access)
     manifest = read_json_file(folder, MANIFEST_NAME, access)
-    require(manifest["cursor"] == position and manifest["plan_sha"] == master["state"]["plan_sha"], "BATCH_PLAN_DIGEST")
+    require(manifest["cursor"] == position and manifest["plan_sha"] == plan_sha, "BATCH_PLAN_DIGEST")
     if create and journal.version(0) is None:
         initial = master["state"]
         journal.initialize({"manifest_sha": digest(encode(manifest)), "pause": initial["pause"],
@@ -262,7 +322,7 @@ def wait_for_request(state):
     return due > now
 
 
-def accept_segment(folder, manifest, journal, record, master_journal, master, access, run):
+def accept_segment(folder, manifest, journal, record, master_journal, master, access, run, group):
     record = release_batch.accept(manifest, record, journal, access, workers=16, reread_verified=False)
     state = record["state"]
     tasks = state["tasks"]
@@ -280,7 +340,9 @@ def accept_segment(folder, manifest, journal, record, master_journal, master, ac
     write_json(folder, f"B10_{tag}.json", {"receipts": receipts, "states": dict(counts), "pending": pending}, access)
     if not pending:
         previous = master["state"]
-        master = advance(master_journal, master, cursor=manifest["end"],
+        otc = group == "TPEX"
+        progress = {"otc_cursor" if otc else "cursor": manifest["end"], "next_group": "BASE" if otc else "TPEX"}
+        master = advance(master_journal, master, **progress,
                          totals=dict(Counter(previous["totals"]) + counts),
                          rows=previous["rows"] + sum(r["proof"]["rows"] for r in receipts.values()),
                          bytes=previous["bytes"] + sum(r["proof"]["bytes"] for r in receipts.values()),
@@ -310,12 +372,14 @@ def main():
         plan = read_json_file(root, PLAN, access)
         require(master and master["state"]["plan_sha"] == digest(encode(plan)) and
                 plan["plan_version"] == PLAN_VERSION and plan["campaign"] == CAMPAIGN, "CAMPAIGN_MANIFEST_DIGEST")
-        count = plan["budget"]["windows"]
+        master, supplement = checked_otc_plan(plan, master, journal, root, access, create=phase != "accept")
         state, result = master["state"], {}
-        if state["cursor"] < count and not state.get("auth_hold"):
-            folder, manifest, batch, record = segment(plan, master, root, access, create=phase != "accept")
+        group = pending_group(plan, supplement, state)
+        if group is not None and not state.get("auth_hold"):
+            active_plan = plan if group == "BASE" else supplement
+            folder, manifest, batch, record = segment(active_plan, master, root, access, group, create=phase != "accept")
             if phase == "accept":
-                master, state, result = accept_segment(folder, manifest, batch, record, journal, master, access, run)
+                master, state, result = accept_segment(folder, manifest, batch, record, journal, master, access, run, group)
             else:
                 state = record["state"]
                 if not state.get("auth_hold") and any(t["status"] in {"READY", "REQUESTING"} for t in state["tasks"].values()):
@@ -327,11 +391,13 @@ def main():
                 state = record["state"]
                 result = release_batch.report(manifest, record, run)
         totals = master["state"]
-        resume = totals["cursor"] < count and not state.get("auth_hold")
+        resume = pending_group(plan, supplement, totals) is not None and not state.get("auth_hold")
         if phase == "accept" and (path := os.environ.get("GITHUB_OUTPUT")):
             with open(path, "a", encoding="utf-8") as output:
                 print(f"resume={'true' if resume else 'false'}", file=output)
-        print(json.dumps(result | {"campaign": CAMPAIGN, "budget": plan["budget"], "finished_windows": totals["cursor"],
+        print(json.dumps(result | {"campaign": CAMPAIGN, "budget": year_budget(plan, supplement),
+                                   "finished_windows": totals["cursor"] + totals.get("otc_cursor", 0), "batch_group": group,
+                                   "tpex_new_windows": supplement["budget"]["windows"] if supplement else 0,
                                    "total_states": totals["totals"], "total_rows": totals["rows"],
                                    "total_source_requests": totals["source_requests"],
                                    "reused_receipts": len(plan["reused"]), "automatic_resume": resume,

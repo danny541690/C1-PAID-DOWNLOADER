@@ -66,7 +66,10 @@ def monthly_rows(raw, source):
         raise ValueError("official report did not identify the requested month and security")
     table = payload["tables"][0]
     fields = ["".join(field.split()) for field in table["fields"]]
-    volume = "成交仟股" if source.symbol else "成交股數（仟股）"
+    if source.symbol:
+        volume = "成交仟股"
+    else:
+        volume = "成交張數" if "成交張數" in fields else "成交股數（仟股）"
     value = "收盤" if source.symbol else "櫃買指數"
     date_col, quantity_col, trades_col, value_col = (fields.index(field) for field in ("日期", volume, "筆數", value))
     result = {}
