@@ -2,13 +2,26 @@ name: R12.1 download-only bounded preflight
 on:
   push:
     branches: [codex/r11-1-backer-preflight]
-    paths: [.github/workflows/r12-1-download-preflight.yml]
+    paths:
+      - .github/workflows/r12-1-download-preflight.yml
+      - scripts/r11_backer/bounded_schedule.py
 permissions:
   contents: read
 concurrency:
   group: r12-1-bounded-preflight
   cancel-in-progress: false
 jobs:
+  schedule-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify interrupt recovery, cleanup and repair-only handoff
+        run: |
+          python3 -m scripts.r11_backer.bounded_schedule
+          python3 -m unittest discover -s tests
   catalog-delta:
     runs-on: ubuntu-latest
     timeout-minutes: 4
@@ -137,11 +150,12 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     if: always()
-    needs: [catalog-delta, bronze-canary]
+    needs: [catalog-delta, bronze-canary, schedule-regression]
     steps:
       - run: |
           echo "Catalog: ${{ needs.catalog-delta.result }}"
           echo "Canary: ${{ needs.bronze-canary.result }}"
           echo "Production remains HOLD until persistent dispatch, complete capacity planning and restart verification pass."
+          test "${{ needs.schedule-regression.result }}" = success
           test "${{ needs.catalog-delta.result }}" = success
           test "${{ needs.bronze-canary.result }}" = success
