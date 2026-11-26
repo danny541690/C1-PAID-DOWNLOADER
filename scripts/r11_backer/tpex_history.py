@@ -196,15 +196,16 @@ def gap_status(task, sample, closing):
     return "PASS_RECOVERED_FROM_RANGE" if status == "PASS_DIRECT_CLOSE" else status
 
 
-def private_folder(access, *, create, prefix="R11_TPEX_HISTORY"):
-    name = recovery_location(access, prefix=prefix)
+def private_folder(access, *, create, prefix="R11_TPEX_HISTORY", run_id=None, attempt=None):
+    name = recovery_location(access, prefix=prefix, run_id=run_id, attempt=attempt)
     folder = ensure(RECOVERY_ROOT, name, FOLDER, access, create=create)
     if read_json(f"{BASE}/files/{folder}?fields=shared", access).get("shared") is not False:
         raise ValueError("private historical evidence folder is not verified")
     return folder
 
 
-def save_private(public_payloads, source_urls, paid, details, *, prefix="R11_TPEX_HISTORY"):
+def save_private(public_payloads, source_urls, paid, details, *, prefix="R11_TPEX_HISTORY",
+                 access=None, folder=None):
     files = {f"official/{name}": raw for name, (_, raw) in public_payloads.items() if raw}
     paid_index = []
     for number, (task, sample) in enumerate(paid.items(), 1):
@@ -218,8 +219,9 @@ def save_private(public_payloads, source_urls, paid, details, *, prefix="R11_TPE
         for name, body in files.items():
             archive.writestr(name, body)
         archive.writestr("hashes.json", json_bytes({name: hashlib.sha256(body).hexdigest() for name, body in files.items()}))
-    access = drive_token()
-    confirmed_drive_zip(access, private_folder(access, create=True, prefix=prefix), ARCHIVE, payload.getvalue())
+    access = access or drive_token()
+    folder = folder or private_folder(access, create=True, prefix=prefix)
+    confirmed_drive_zip(access, folder, ARCHIVE, payload.getvalue())
 
 
 def verified_archive_files(access, root):

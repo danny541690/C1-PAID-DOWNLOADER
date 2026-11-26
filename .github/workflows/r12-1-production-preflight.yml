@@ -9,6 +9,7 @@ on:
       - scripts/r11_backer/cross_run_ledger.py
       - scripts/r11_backer/live_bronze_admission.py
       - scripts/r11_backer/release_batch.py
+      - scripts/r11_backer/finish_preflight.py
 permissions:
   contents: read
 concurrency:
@@ -43,7 +44,8 @@ jobs:
     if: >-
       ${{ !contains(github.event.head_commit.message, '[r12-cross-run]') &&
           !contains(github.event.head_commit.message, '[r12-live-bronze]') &&
-          !contains(github.event.head_commit.message, '[r12-release-batch]') }}
+          !contains(github.event.head_commit.message, '[r12-release-batch]') &&
+          !contains(github.event.head_commit.message, '[r12-finish-preflight]') }}
     needs: release-check
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -182,10 +184,55 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.release_batch audit
+  finish-source:
+    if: contains(github.event.head_commit.message, '[r12-finish-preflight]')
+    needs: release-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reconcile prior evidence and probe unresolved windows in parallel
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.finish_preflight dispatch
+  finish-existing:
+    if: contains(github.event.head_commit.message, '[r12-finish-preflight]')
+    needs: release-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify accepted Bronze originals from the first batch without re-fetching
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_batch audit
+  finish-accept:
+    needs: [finish-source, finish-existing]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reconcile all new source receipts and publish independently proved scopes
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.finish_preflight accept
   archive-test-run:
     name: Save Backer test history to private Drive
     if: always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER'
-    needs: [release-check, rehearsal-prepare, rehearsal-recover, rehearsal-accept, ledger-origin, ledger-acceptance, live-bronze-capture, live-bronze-accept, batch-dispatch, batch-accept]
+    needs: [release-check, rehearsal-prepare, rehearsal-recover, rehearsal-accept, ledger-origin, ledger-acceptance, live-bronze-capture, live-bronze-accept, batch-dispatch, batch-accept, finish-source, finish-existing, finish-accept]
     permissions:
       actions: read
       contents: read

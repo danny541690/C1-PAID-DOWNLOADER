@@ -16,7 +16,8 @@ permissions:
 jobs:
   synthetic-checks:
     if: >-
-      ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[r12-release-batch]')) &&
+      ${{ !(github.event_name == 'push' && (contains(github.event.head_commit.message, '[r12-release-batch]') ||
+            contains(github.event.head_commit.message, '[r12-finish-preflight]'))) &&
           !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
             github.event.pull_request.head.ref == 'codex/r11-1-backer-preflight') }}
     runs-on: ubuntu-latest
@@ -31,7 +32,8 @@ jobs:
         run: python3 -m scripts.r11_backer.dataset_pilot --plan
   public-catalog:
     if: >-
-      ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[r12-release-batch]')) &&
+      ${{ !(github.event_name == 'push' && (contains(github.event.head_commit.message, '[r12-release-batch]') ||
+            contains(github.event.head_commit.message, '[r12-finish-preflight]'))) &&
           !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
             github.event.pull_request.head.ref == 'codex/r11-1-backer-preflight') }}
     runs-on: ubuntu-latest
@@ -1172,7 +1174,8 @@ jobs:
     if: >-
       always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
       github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' &&
-      !contains(github.event.head_commit.message, '[r12-release-batch]')
+      !contains(github.event.head_commit.message, '[r12-release-batch]') &&
+      !contains(github.event.head_commit.message, '[r12-finish-preflight]')
     needs:
       - synthetic-checks
       - public-catalog
