@@ -844,3 +844,68 @@ class TPExHistoricalEvidenceTests(unittest.TestCase):
         self.assertEqual(archived_responses(files)[0], {name: raw})
         with self.assertRaises(ValueError):
             archived_responses(files | {f"official/{name}": b"other page"})
+
+
+class OfficialListingCrosscheckTests(unittest.TestCase):
+    def setUp(self):
+        from scripts.r11_backer.market_lifetimes import Event
+
+        self.opening = Event("TPEx", "1234", "甲科技", date(2015, 6, 12), "starts#1")
+        self.closing = Event("TPEx", "1234", "甲科技股份有限公司", date(2020, 1, 2), "ends#1")
+        self.name = "tpex-1234-2015-06.json"
+
+    def monthly_report(self, days):
+        from scripts.r11_backer.test_archive import json_bytes
+
+        return json_bytes({"stat": "ok", "date": "20150601", "code": "1234", "tables": [{
+            "title": "個股日成交資訊", "fields": ["日期", "成交仟股", "筆數", "開盤", "最高", "最低", "收盤"],
+            "notes": ["不含上櫃股票鉅額交易"],
+            "data": [[day, "10", "3", "10", "10", "10", "10"] for day in days],
+        }]})
+
+    def test_plain_legal_suffix_and_first_trade_verify_a_closed_interval(self):
+        from scripts.r11_backer.listing_crosscheck import otc_decision
+
+        outcome, interval = otc_decision(self.opening, self.closing, {self.name: self.monthly_report(["104/06/12"])})
+        self.assertEqual(outcome["decision"], "PASS")
+        self.assertEqual(interval["proof"], ["starts#1", "ends#1", self.name + "#1"])
+        self.assertEqual(interval["end_exclusive"], "2020-01-02")
+
+    def test_first_trade_disagreement_does_not_move_an_official_listing_date(self):
+        from scripts.r11_backer.listing_crosscheck import otc_decision
+
+        outcomes, interval = otc_decision(
+            self.opening, self.closing, {self.name: self.monthly_report(["104/06/11", "104/06/12"])}
+        )
+        self.assertEqual(outcomes["decision"], "HOLD_TRADE_START_DISAGREEMENT")
+        self.assertIsNone(interval)
+
+    def test_dated_notice_requires_exact_issuer_alias_code_and_calendar_date(self):
+        from dataclasses import replace
+        from scripts.r11_backer.listing_crosscheck import notice_matches
+
+        start = replace(self.opening, issuer="甲科")
+        notice = ("<p>主旨：甲科技股份有限公司初次申請上櫃普通股股票</p>"
+                  "<p>開始櫃檯買賣日期：民國104年6月12日。</p><p>代號：1234。(二)簡稱：甲科。</p>")
+        self.assertTrue(notice_matches(notice.encode(), start, self.closing, "START"))
+        for wrong, value in (("甲科。", "甲科技。"), ("1234", "5678"), ("6月12日", "6月13日"),
+                             ("甲科技股份有限公司", "乙科技股份有限公司")):
+            self.assertFalse(notice_matches(notice.replace(wrong, value).encode(), start, self.closing, "START"))
+
+    def test_managed_trade_after_effective_date_does_not_create_an_initial_listing(self):
+        from dataclasses import replace
+        from scripts.r11_backer.listing_crosscheck import otc_decision
+        from scripts.r11_backer.test_archive import json_bytes
+
+        managed = replace(self.opening, issuer="甲科技（管理股票）")
+        market = json_bytes({"stat": "ok", "date": "20150615", "tables": [{
+            "title": "管理股票", "fields": ["代號", "成交股數", "成交金額(元)", "成交筆數", "開盤", "最高", "最低", "收盤"],
+            "data": [["1234", "10000", "100000", "3", "10", "10", "10", "10"]],
+        }]})
+        outcomes, interval = otc_decision(managed, self.closing, {
+            self.name: self.monthly_report(["104/06/15"]), "tpex-managed-day-2015-06-15.json": market,
+        })
+        self.assertEqual(outcomes["decision"], "HOLD_MANAGED_ORIGINAL_LISTING_START")
+        self.assertEqual(outcomes["effective"], "2015-06-12")
+        self.assertEqual(outcomes["first_managed_trade_verified_in_probe"], "2015-06-15")
+        self.assertIsNone(interval)

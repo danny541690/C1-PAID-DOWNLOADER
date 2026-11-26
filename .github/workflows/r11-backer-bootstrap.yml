@@ -673,6 +673,47 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: python3 -m scripts.r11_backer.twse_historical_codes --verify-only
+  listing-crosscheck:
+    name: Reconcile dated exchange notices, OTC trades and bank conflicts
+    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-listing-crosscheck]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify historical case records and archive official evidence
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.listing_crosscheck
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-listing-crosscheck-${{ github.run_attempt }}
+          path: r11-listing-crosscheck.json
+          if-no-files-found: error
+          retention-days: 30
+  listing-crosscheck-readback:
+    name: Verify official listing reconciliation from private Drive
+    needs: [listing-crosscheck, synthetic-checks]
+    if: needs.listing-crosscheck.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read back checksums and reproduce the decisions
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.listing_crosscheck --verify-only
   manifest-preview:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
     runs-on: ubuntu-latest
@@ -908,6 +949,8 @@ jobs:
       - market-listing-chronology-readback
       - twse-historical-codes
       - twse-historical-codes-readback
+      - listing-crosscheck
+      - listing-crosscheck-readback
       - manifest-preview
       - manifest-readback
       - integration-b00

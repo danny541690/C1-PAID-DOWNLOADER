@@ -126,9 +126,9 @@ def verified_handover_intervals(starts, exits, profiles, summary):
     return [row for row in combined if row["kind"] == "OFFICIAL_CLOSED_INTERVAL_WITH_LISTING_HANDOVER"]
 
 
-def market_table(raw, title):
+def market_table(raw, title, day=GAP_DAY):
     payload = json.loads(raw)
-    if payload.get("stat") != "ok" or payload.get("date") != GAP_DAY.strftime("%Y%m%d"):
+    if payload.get("stat") != "ok" or payload.get("date") != day.strftime("%Y%m%d"):
         raise ValueError("wrong source date for official daily report")
     tables = [table for table in payload["tables"] if table["title"] == title]
     if len(tables) != 1:
