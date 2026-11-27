@@ -1,9 +1,18 @@
 import unittest
+from unittest.mock import patch
 
+from scripts.r11_backer.final_readiness_v2 import Context
 from scripts.r11_backer.production_preflight import FINAL_GATES, evaluate, final_readiness_verdict
 
 
 class FinalReadinessTests(unittest.TestCase):
+    @patch("scripts.r11_backer.final_readiness_v2.write_json")
+    def test_canonical_readback_uses_json_types(self, write):
+        ctx = Context.__new__(Context)
+        ctx.root, ctx.access = "test-folder", "test-access"
+        ctx.write("registry.json", {"rows": ({"key": ("code", "date")},)})
+        write.assert_called_once_with("test-folder", "registry.json", {"rows": [{"key": ["code", "date"]}]}, "test-access")
+
     def test_all_gates_pass_without_granting_release(self):
         result = evaluate(None, None, None, gate_results=dict.fromkeys(FINAL_GATES, "PASS"))
         self.assertEqual(result["result"], "READY_FOR_USER_RELEASE")

@@ -2,7 +2,9 @@
 
 import argparse
 from importlib import import_module
+import json
 import os
+import re
 
 from .cross_run_ledger import DriveJournal
 from .drive_pilot import FOLDER, ROOT, ensure, find, token
@@ -72,7 +74,7 @@ class Context:
         return read_json_file(self.root, name, self.access)
 
     def write(self, name, body):
-        return write_json(self.root, name, body, self.access)
+        return write_json(self.root, name, json.loads(encode(body)), self.access)
 
     def production(self):
         if self._production is None:
@@ -141,9 +143,35 @@ def input_lock(ctx):
     return {"status": "PASS", "outputs": {"INPUT_LOCK.json": book}}
 
 
+def resume_gate(ctx, gate):
+    previous = os.environ.get("R12_RESUME_FROM", "")
+    if gate not in ("G01", "G02") or not re.fullmatch(r"\d+_\d+", previous):
+        return None
+    try:
+        folder = private_path(ctx.access, ctx.task_root, previous)
+        record = read_json_file(folder, f"{gate}.json", ctx.access)
+        run, attempt = map(int, previous.split("_"))
+        require(record["status"] == "PASS" and record["gate"] == gate and record["task_id"] == TASK_ID and
+                record["spec_sha256"] == SPEC_SHA and record["run_id"] == run and record["attempt"] == attempt,
+                "RESUME_REPORT_BINDING")
+        if gate == "G02":
+            locked = read_json_file(folder, "INPUT_LOCK.json", ctx.access)["production"]
+            require(locked == ctx.read("INPUT_LOCK.json")["production"], "RESUME_PRODUCTION_SNAPSHOT")
+        files = {name: read_json_file(folder, name, ctx.access) for name in EXPECTED[gate]}
+        require(all(digest(encode(body)) == record["output_sha256"][name] for name, body in files.items()),
+                "RESUME_OUTPUT_DIGEST")
+        return {"status": "PASS", "outputs": files,
+                "verified_checkpoint": {"run_id": run, "attempt": attempt, "commit": record["commit"],
+                                        "sha256": digest(encode(record))}}
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+        return None
+
+
 def record_gate(ctx, gate):
     try:
-        if gate == "G00":
+        if (result := resume_gate(ctx, gate)) is not None:
+            pass
+        elif gate == "G00":
             result = input_lock(ctx)
         else:
             module = import_module(f".{MODULES[gate]}", __package__)
@@ -161,7 +189,7 @@ def record_gate(ctx, gate):
             result.update(status="FAIL", reason="REQUIRED_OUTPUT_MISSING")
     except Exception as error:
         result = {"status": "FAIL", "exception_class": type(error).__name__, "output_sha256": {}}
-        if isinstance(error, RehearsalError):
+        if isinstance(error, RehearsalError) or re.fullmatch(r"[A-Z][A-Z0-9_]{2,70}", str(error)):
             result["reason"] = str(error)
     ctx.write(f"{gate}.json", ctx.binding() | result | {"gate": gate, "job": os.environ["GITHUB_JOB"]})
     print(f"{gate} {result['status']}")

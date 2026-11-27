@@ -293,7 +293,7 @@ def run(ctx):
         for record in report["active_batch"]["tasks"]:
             if record["disposition"] == "VERIFIED_RECEIPT":
                 active.append(receipt_entry(record, record["receipt"], {"folder": report["active_batch"].get("folder")}))
-    except (KeyError, TypeError, OSError, ValueError) as exc:
+    except (KeyError, TypeError, OSError, ValueError, RuntimeError) as exc:
         findings.append("ACTIVE_BATCH_EVIDENCE_UNAVAILABLE_" + type(exc).__name__)
     receipts.extend(active)
     plans = [plan for plan in (ctx.plan, ctx.supplement) if plan]
