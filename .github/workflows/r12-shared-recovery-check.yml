@@ -1,0 +1,123 @@
+name: R12 shared workspace and recovery readiness
+on:
+  push:
+    branches: [codex/r11-1-backer-preflight]
+    paths: [.github/workflows/r12-shared-recovery-check.yml]
+permissions:
+  contents: read
+concurrency:
+  group: r12-1-bounded-preflight
+  cancel-in-progress: false
+jobs:
+  H-workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read ChatGPT event and publish a private independent receipt
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from scripts.r11_backer.drive_pilot import ROOT,FOLDER,ensure,token,find
+          from scripts.r11_backer.integration_pilot import verify_private_folder
+          from scripts.r11_backer.release_probes import read_private_file
+          from scripts.r11_backer.live_recovery_canary import write_json,read_json_file
+          def main():
+              access=token()
+              parent=ROOT
+              verify_private_folder(parent,access)
+              for name in ("00_COMMAND","R12_BACKER","00_SHARED_CONTEXT"):
+                  parent=ensure(parent,name,FOLDER,access,create=False)
+                  verify_private_folder(parent,access)
+              item=find(parent,"H_R12_ROUNDTRIP_20261127_01.json",access)
+              if not item: raise ValueError("MISSING_CHATGPT_EVENT")
+              verify_private_folder(item["id"],access)
+              raw=read_private_file(item["id"],access)
+              sha=hashlib.sha256(raw).hexdigest()
+              if sha!="8ec7bb6605920241ef89b8f9c989c511a5ea0f773164ebf4a9c5c944be2e48b4": raise ValueError("INPUT_DIGEST")
+              event=json.loads(raw)
+              if event["task_id"]!="H-R12-ROUNDTRIP-20261127-01": raise ValueError("TASK_ID")
+              receipt={"task_id":event["task_id"],"input_sha256":sha,"writer":"GitHub Actions","run_id":os.environ["GITHUB_RUN_ID"],"attempt":os.environ["GITHUB_RUN_ATTEMPT"],"commit":os.environ["GITHUB_SHA"],"result":"PASS_RUNNER_READ_WRITE","codex_direct_ack":"NOT_TESTED","finmind_requests":0}
+              name="H_R12_RUNNER_RECEIPT_"+receipt["run_id"]+"_"+receipt["attempt"]+".json"
+              write_json(parent,name,receipt,access)
+              if read_json_file(parent,name,access)!=receipt: raise ValueError("RECEIPT")
+              print("H_WORKSPACE_RUNNER_ROUNDTRIP_PASS")
+          try: main()
+          except Exception as e:
+              print("H_WORKSPACE_HOLD",type(e).__name__)
+              raise SystemExit(1) from None
+          PY
+  D-recovery-readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read durable production cursor and classify pending tasks without source calls
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time
+          from collections import Counter
+          from urllib.error import HTTPError, URLError
+          from scripts.r11_backer import production_download as p
+          from scripts.r11_backer.drive_pilot import token,ensure,FOLDER
+          from scripts.r11_backer.live_recovery_canary import read_json_file,write_json
+          from scripts.r11_backer.integration_pilot import digest,encode,verify_private_folder
+          from scripts.r11_backer.cross_run_ledger import DriveJournal
+          def retry_read(fn):
+              for attempt in range(4):
+                  try: return fn()
+                  except HTTPError as e:
+                      if e.code not in (429,500,502,503,504) or attempt==3: raise
+                  except (URLError,TimeoutError):
+                      if attempt==3: raise
+                  time.sleep(2**attempt)
+          def inspect():
+              access=token()
+              parent,root=p.management(access,create=False)
+              journal=DriveJournal(root,access)
+              master=journal.head()
+              plan=read_json_file(root,p.PLAN,access)
+              if not master or master["state"]["plan_sha"]!=digest(encode(plan)): raise ValueError("PLAN_DIGEST")
+              master,supplement=p.checked_otc_plan(plan,master,journal,root,access,create=False)
+              group=p.pending_group(plan,supplement,master["state"])
+              counts={}
+              if group:
+                  active=plan if group=="BASE" else supplement
+                  _,manifest,_,record=p.segment(active,master,root,access,group,create=False)
+                  counts=dict(Counter(t["status"] for t in record["state"]["tasks"].values()))
+              summary={"task_id":"D-R12-RECOVERY-READINESS","run_id":os.environ["GITHUB_RUN_ID"],"attempt":os.environ["GITHUB_RUN_ATTEMPT"],"commit":os.environ["GITHUB_SHA"],"master_sequence":master["sequence"],"current_group":group,"current_batch_states":counts,"total_states":master["state"]["totals"],"base_cursor":master["state"]["cursor"],"otc_cursor":master["state"].get("otc_cursor",0),"campaign_windows":p.year_budget(plan,supplement)["windows"],"source_requests":0,"full_history_release":"HOLD","production_mutations":0}
+              return access,parent,summary
+          try:
+              access,parent,summary=retry_read(inspect)
+              shared=ensure(parent,"00_SHARED_CONTEXT",FOLDER,access,create=False)
+              verify_private_folder(shared,access)
+              name="D_R12_RECOVERY_READINESS_"+summary["run_id"]+"_"+summary["attempt"]+".json"
+              write_json(shared,name,summary,access)
+              print("D_DURABLE_CURSOR_READBACK_PASS; production unchanged")
+          except Exception as e:
+              print("D_RECOVERY_READBACK_HOLD",type(e).__name__)
+              raise SystemExit(1) from None
+          PY
+  preflight-verdict:
+    if: always()
+    needs: [H-workspace,D-recovery-readiness]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Workspace runner test: ${{ needs.H-workspace.result }}"
+          echo "Production cursor test: ${{ needs.D-recovery-readiness.result }}"
+          echo "Full historical download remains HOLD; Codex direct acknowledgement and production recovery/manifest release required."
+          test "${{ needs.H-workspace.result }}" = success
+          test "${{ needs.D-recovery-readiness.result }}" = success

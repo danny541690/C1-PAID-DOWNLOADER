@@ -1,0 +1,222 @@
+name: R12.1 download-only bounded preflight
+on:
+  push:
+    branches: [codex/r11-1-backer-preflight]
+    paths:
+      - .github/workflows/r12-1-download-preflight.yml
+      - scripts/r11_backer/bounded_schedule.py
+      - scripts/r11_backer/live_recovery_canary.py
+      - scripts/r11_backer/release_probes.py
+permissions:
+  contents: read
+concurrency:
+  group: r12-1-bounded-preflight
+  cancel-in-progress: false
+jobs:
+  schedule-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify interrupt recovery, cleanup and repair-only handoff
+        run: |
+          python3 -m scripts.r11_backer.bounded_schedule
+          python3 -m unittest discover -s tests
+  catalog-delta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reuse prior evidence and compare current public catalog
+        run: |
+          python3 - <<'PY'
+          import json
+          from urllib.request import urlopen
+          from pathlib import Path
+          from scripts.r11_backer.reconcile_catalog import documented_tiers, BACKER_COMPATIBLE
+          from scripts.r11_backer.preflight import read_catalog
+          with urlopen("https://raw.githubusercontent.com/FinMind/FinMind-MCP/master/knowledge/datasets.md", timeout=20) as f:
+              raw = f.read(1000001)
+          if len(raw) > 1000000:
+              raise SystemExit("catalog size exceeds bound")
+          public = documented_tiers(raw.decode())
+          old = {r["dataset"] for r in read_catalog()}
+          evidence = json.loads(Path("scripts/r11_backer/release_evidence.json").read_text())
+          eligible = {k for k,v in public.items() if v in BACKER_COMPATIBLE}
+          report = {"public":len(public), "backer_compatible":len(eligible), "reused":len(old & evidence.keys()),
+                    "missing":sorted(eligible-old), "absent":sorted(old-public.keys()),
+                    "tier_changed":sorted(old-eligible), "missing_evidence":sorted(old-evidence.keys())}
+          print(json.dumps(report))
+          if old != eligible or old != set(evidence):
+              raise SystemExit("catalog delta requires review")
+          print("T01_CATALOG_DELTA_PASS; historical bounds not yet certified")
+          PY
+  bronze-canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify capacity and one bounded original in the formal month path
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import gzip, hashlib, json, os
+          from scripts.r11_backer.archive import compress_original
+          from scripts.r11_backer.drive_pilot import BASE, ROOT, FOLDER, ensure, find, token
+          from scripts.r11_backer.live_preflight import read_json, drive_health, finmind_status
+          from scripts.r11_backer.release_probes import Task, request_sample, read_private_file
+          from scripts.r11_backer.release_remediation import pinned_contracts
+          def require_private(fid, access):
+              m = read_json(f"{BASE}/files/{fid}?fields=shared,trashed", access)
+              if m.get("shared") is not False or m.get("trashed") is not False:
+                  raise ValueError("privacy or identity not verified")
+          def main():
+              access = token()
+              health = drive_health(access)
+              if health["status"] != "POSITIVE_CAPACITY_AND_BRONZE_ACCESS" or health["available_bytes"] < 1048576:
+                  raise ValueError("insufficient verified canary capacity")
+              require_private(ROOT, access)
+              bronze = ensure(ROOT,"20_BRONZE",FOLDER,access,create=False)
+              require_private(bronze,access)
+              parent = bronze
+              for name in ("2026","FinMind_Backer","2026-09"):
+                  parent=ensure(parent,name,FOLDER,access,create=True)
+                  require_private(parent,access)
+              command=ensure(ROOT,"00_COMMAND",FOLDER,access,create=False)
+              require_private(command,access)
+              ledger=ensure(command,"R12_BACKER",FOLDER,access,create=False)
+              require_private(ledger,access)
+              filename="TaiwanBusinessIndicator__2026-09-01__2026-09-30__r12_canary.json.gz"
+              receipt_name="R12_1_BRONZE_CANARY_RECEIPT.json"
+              task=Task("TaiwanBusinessIndicator","2026-09-01","2026-09-30")
+              existing=find(parent,filename,access)
+              receipt=find(ledger,receipt_name,access)
+              if existing:
+                  if not receipt:
+                      raise ValueError("existing canary has no verified source receipt")
+                  require_private(existing["id"],access)
+                  require_private(receipt["id"],access)
+                  prior=json.loads(read_private_file(receipt["id"],access))
+                  packed=read_private_file(existing["id"],access)
+                  original=gzip.decompress(packed)
+                  if prior["file_id"] != existing["id"] or prior["parameters"] != task.parameters() or prior["raw_sha256"] != hashlib.sha256(original).hexdigest() or prior["gzip_sha256"] != hashlib.sha256(packed).hexdigest():
+                      raise ValueError("existing receipt mismatch")
+                  rows=json.loads(original)["data"]
+                  if len(rows)!=prior["rows"] or rows[0]!=prior["first"] or rows[-1]!=prior["last"]:
+                      raise ValueError("existing row receipt mismatch")
+                  print("T02_BRONZE_CANARY_PASS_REUSED; source_requests=0")
+                  return
+              if receipt:
+                  raise ValueError("orphaned canary receipt")
+              if finmind_status() != "ACCOUNT_HEADROOM_OBSERVED":
+                  raise ValueError("provider quota not verified")
+              sample=request_sample(task,pinned_contracts()[task.dataset],os.environ["FINMIND_BACKER_TOKEN"],max_bytes=65536)
+              if sample.status not in ("VALID_SAMPLE","FIELD_DIFFERENCES") or not sample.raw:
+                  raise ValueError("bounded source sample unavailable")
+              rows=json.loads(sample.raw)["data"]
+              if len(rows)!=1 or rows[0].get("date")!="2026-09-01":
+                  raise ValueError("monthly coverage not verified")
+              packed,raw_sha,gzip_sha=compress_original(sample.raw)
+              fid=ensure(parent,filename,"application/gzip",access,packed,create=True)
+              require_private(fid,access)
+              saved=read_private_file(fid,access)
+              decoded=gzip.decompress(saved)
+              stored=json.loads(decoded)["data"]
+              if saved!=packed or decoded!=sample.raw or len(stored)!=len(rows) or stored[0]!=rows[0] or stored[-1]!=rows[-1]:
+                  raise ValueError("source and destination differ")
+              detail={"file_id":fid,"parameters":task.parameters(),"raw_sha256":raw_sha,"gzip_sha256":gzip_sha,
+                      "rows":len(rows),"first":rows[0],"last":rows[-1],"run_id":os.environ["GITHUB_RUN_ID"],
+                      "status":"PASS_BOUNDED_CANARY","production":"NOT_RELEASED"}
+              rid=ensure(ledger,receipt_name,"application/json",access,json.dumps(detail,ensure_ascii=False).encode(),create=True)
+              require_private(rid,access)
+              if json.loads(read_private_file(rid,access))!=detail:
+                  raise ValueError("receipt readback mismatch")
+              print("T02_BRONZE_CANARY_PASS; source_requests=1; account_check=1")
+              print("T03_CAPACITY_POSITIVE_FOR_CANARY_ONLY; full_volume_not_certified")
+          try:
+              main()
+          except Exception as e:
+              print("R12_BOUNDED_PREFLIGHT_HOLD",type(e).__name__)
+              raise SystemExit(1) from None
+          PY
+  live-recovery-prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare bounded private Backer rehearsal
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 -m scripts.r11_backer.live_recovery_canary prepare
+  live-recovery-recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: live-recovery-prepare
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Recover bounded private Backer rehearsal
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.live_recovery_canary recover
+  live-recovery-accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: live-recovery-recover
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Accept bounded private Backer rehearsal
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.live_recovery_canary accept
+  cross-run-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read back the accepted baseline from a separate workflow run
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.live_recovery_canary accept --prior-run 45785919941
+  gate:
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [catalog-delta, bronze-canary, schedule-regression, live-recovery-accept, cross-run-replay]
+    steps:
+      - run: |
+          echo "Catalog: ${{ needs.catalog-delta.result }}"
+          echo "Schedule regression: ${{ needs.schedule-regression.result }}"
+          echo "Full-download authorization remains gated."
+          echo "Canary: ${{ needs.bronze-canary.result }}"
+          echo "Production remains HOLD until persistent dispatch, complete capacity planning and restart verification pass."
+          test "${{ needs.schedule-regression.result }}" = success
+          test "${{ needs.catalog-delta.result }}" = success
+          test "${{ needs.bronze-canary.result }}" = success
+          test "${{ needs.live-recovery-accept.result }}" = success
+          test "${{ needs.cross-run-replay.result }}" = success

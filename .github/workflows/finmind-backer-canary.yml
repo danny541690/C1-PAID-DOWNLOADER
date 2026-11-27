@@ -1,14 +1,32 @@
 name: FinMind Backer - read-only connectivity and schema canary
+run-name: ${{ inputs.r12_production != '' && format('R12.1 Backer production ({0})', inputs.r12_production) || 'FinMind Backer canary or preflight' }}
 on:
   workflow_dispatch:
+    inputs:
+      r12_production:
+        description: R12 production action (launch or continue on the Backer branch)
+        type: string
+        default: ''
+      r12_origin:
+        description: Private R12 rollout origin run ID for automatic continuation
+        type: string
+        default: ''
+      r12_archive_run:
+        description: Completed continuation run to archive without downloading data
+        type: string
+        default: ''
   push:
     paths:
       - ".github/workflows/finmind-backer-canary.yml"
       - "scripts/finmind_backer_canary.py"
 permissions:
   contents: read
+concurrency:
+  group: ${{ (inputs.r12_origin != '' || inputs.r12_production != '') && 'r12-1-bounded-preflight' || format('backer-canary-{0}', github.run_id) }}
+  cancel-in-progress: false
 jobs:
   finmind-schema-canary:
+    if: inputs.r12_origin == '' && inputs.r12_archive_run == '' && inputs.r12_production == '' && !contains(github.event.head_commit.message, '[r12-rollout-gates]') && !contains(github.event.head_commit.message, '[r12-rollout-archive]') && !contains(github.event.head_commit.message, '[r12-production-schedule]')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -25,3 +43,115 @@ jobs:
           path: finmind_canary_report/
           retention-days: 7
           if-no-files-found: warn
+  r12-resume-dispatch:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && inputs.r12_origin != '' && inputs.r12_archive_run == '' && inputs.r12_production == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reopen the frozen manifest and dispatch the next wave using the same quota ledger
+        env:
+          R12_ORIGIN: ${{ inputs.r12_origin }}
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_rollout dispatch --origin "$R12_ORIGIN"
+  r12-resume-accept:
+    needs: r12-resume-dispatch
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Independently verify both waves and record acceptance and repairs
+        env:
+          R12_ORIGIN: ${{ inputs.r12_origin }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_rollout accept --origin "$R12_ORIGIN"
+  r12-resume-archive:
+    name: Save Backer test history to private Drive
+    if: always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && inputs.r12_origin != '' && inputs.r12_production == ''
+    needs: [r12-resume-dispatch, r12-resume-accept]
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive the continuation logs and verify private Drive readback
+        env:
+          R12_ORIGIN: ${{ inputs.r12_origin }}
+          R12_ARCHIVE_RUN: ${{ inputs.r12_archive_run }}
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          if [[ -n "$R12_ARCHIVE_RUN" ]]; then
+            python3 -m scripts.r11_backer.test_archive --completed-run "$R12_ARCHIVE_RUN" --source-run "$R12_ORIGIN"
+          else
+            python3 -m scripts.r11_backer.test_archive --current-only --source-run "$R12_ORIGIN"
+          fi
+  r12-production-download:
+    if: >-
+      github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/codex/r11-1-backer-preflight' &&
+      (inputs.r12_production == 'launch' || inputs.r12_production == 'continue')
+    runs-on: ubuntu-latest
+    timeout-minutes: 72
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify campaign and recovery logic before the first dispatch
+        if: inputs.r12_production == 'launch'
+        run: python3 -m unittest discover -s tests
+      - name: Dispatch the next certified batch through B00 and its assigned lanes
+        env:
+          R12_PRODUCTION: ${{ inputs.r12_production }}
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.production_download "$R12_PRODUCTION"
+  r12-production-accept:
+    needs: r12-production-download
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      resume: ${{ steps.accept.outputs.resume }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: B10 verifies originals and publishes receipts and B09 exceptions
+        id: accept
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.production_download accept
+  r12-production-next:
+    needs: r12-production-accept
+    if: needs.r12-production-accept.outputs.resume == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Continue from the durable campaign cursor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh workflow run finmind-backer-canary.yml --repo "$GITHUB_REPOSITORY"
+          --ref "$GITHUB_REF_NAME" -f r12_production=continue

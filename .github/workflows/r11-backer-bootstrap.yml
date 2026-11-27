@@ -1,0 +1,1253 @@
+name: R11.1 Backer pre-release pilot
+on:
+  push:
+    branches:
+      - codex/r11-1-backer-preflight
+  pull_request:
+    paths:
+      - scripts/r11_backer/**
+      - tests/test_r11_backer.py
+      - .github/workflows/r11-backer-bootstrap.yml
+concurrency:
+  group: r11-backer-pilot-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  synthetic-checks:
+    if: >-
+      ${{ !(github.event_name == 'push' && (contains(github.event.head_commit.message, '[r12-release-batch]') ||
+            contains(github.event.head_commit.message, '[r12-finish-preflight]') ||
+            contains(github.event.head_commit.message, '[r12-finish-readback]') ||
+            contains(github.event.head_commit.message, '[r12-rollout-gates]') ||
+            contains(github.event.head_commit.message, '[r12-rollout-archive]') ||
+            contains(github.event.head_commit.message, '[r12-production-schedule]'))) &&
+          !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
+            github.event.pull_request.head.ref == 'codex/r11-1-backer-preflight') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify historical candidate catalog and release holds
+        run: python3 -m scripts.r11_backer.preflight --catalog-only
+      - name: Run synthetic archive and preflight tests
+        run: python3 -m unittest discover -s tests -p test_r11_backer.py -v
+      - name: Validate incremental probe plan without credentials
+        run: python3 -m scripts.r11_backer.dataset_pilot --plan
+  public-catalog:
+    if: >-
+      ${{ !(github.event_name == 'push' && (contains(github.event.head_commit.message, '[r12-release-batch]') ||
+            contains(github.event.head_commit.message, '[r12-finish-preflight]') ||
+            contains(github.event.head_commit.message, '[r12-finish-readback]') ||
+            contains(github.event.head_commit.message, '[r12-rollout-gates]') ||
+            contains(github.event.head_commit.message, '[r12-rollout-archive]') ||
+            contains(github.event.head_commit.message, '[r12-production-schedule]'))) &&
+          !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
+            github.event.pull_request.head.ref == 'codex/r11-1-backer-preflight') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconcile pinned public documentation and historical candidates
+        run: python3 -m scripts.r11_backer.reconcile_catalog
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r11-public-catalog-${{ github.run_attempt }}
+          path: r11-public-catalog.json
+          if-no-files-found: error
+          retention-days: 14
+  live-read-only-preflight:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-live-pilot]') || contains(github.event.head_commit.message, '[r11-full-preflight]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    outputs:
+      pilot: ${{ steps.probe.outputs.pilot }}
+      drive: ${{ steps.probe.outputs.drive }}
+      finmind: ${{ steps.probe.outputs.finmind }}
+      historical: ${{ steps.probe.outputs.backer_historical_probe }}
+      recent: ${{ steps.probe.outputs.backer_recent_probe }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check current Drive and quota and reuse verified macro samples
+        id: probe
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          R11_REUSE_MACRO_PILOT: '1'
+          R11_FULL_PREFLIGHT: ${{ contains(github.event.head_commit.message, '[r11-full-preflight]') }}
+        run: |
+          set -euo pipefail
+          export R11_PENDING_PROBES="$(python3 -m scripts.r11_backer.dataset_pilot --count)"
+          if [[ "$R11_FULL_PREFLIGHT" == true ]]; then
+            sweep_plan=$(python3 -c 'from scripts.r11_backer.preflight import read_catalog; from scripts.r11_backer.release_probes import BULK_CANDIDATES; print(sum(r["routing"].startswith("B") for r in read_catalog()) + 10 * len(BULK_CANDIDATES) + 2)')
+            export R11_PENDING_PROBES="$((R11_PENDING_PROBES + sweep_plan))"
+          fi
+          printf 'Backer request ceiling: %s (one account check plus %s pending sample requests)\n'             "$((1 + R11_PENDING_PROBES))" "$R11_PENDING_PROBES" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -m scripts.r11_backer.live_preflight
+  remote-seed:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-live-pilot]') || contains(github.event.head_commit.message, '[r11-full-preflight]'))
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      seed: ${{ steps.create.outputs.seed }}
+    steps:
+      - id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch="codex/r11-cas-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          api="repos/$GITHUB_REPOSITORY"
+          path=".jarvis-test/r11-synthetic.json"
+          gh api "$api/git/refs" -f ref="refs/heads/$branch" -f sha="$GITHUB_SHA" >/dev/null
+          payload=$(printf '{"remaining":1,"owner":null,"events":[],"paused_until":0}' | base64 -w0)
+          seed=$(gh api --method PUT "$api/contents/$path" -f branch="$branch" -f content="$payload" -f message='Seed synthetic quota test' --jq .content.sha)
+          test -n "$seed"
+          printf 'seed=%s\n' "$seed" >> "$GITHUB_OUTPUT"
+  remote-claim:
+    needs: [remote-seed, live-read-only-preflight]
+    if: needs.live-read-only-preflight.outputs.pilot == 'PASS'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [alpha, beta, gamma]
+    steps:
+      - uses: actions/checkout@v4
+      - id: claim
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEED: ${{ needs.remote-seed.outputs.seed }}
+          WORKER: ${{ matrix.worker }}
+        run: |
+          set -euo pipefail
+          branch="codex/r11-cas-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          api="repos/$GITHUB_REPOSITORY/contents/.jarvis-test/r11-synthetic.json"
+          count=$(python3 -m scripts.r11_backer.dataset_pilot --count)
+          now=$(date +%s)
+          snapshot=$(gh api "$api?ref=$branch" --jq '.content | @base64d')
+          if (( count > 0 )) && jq -e '.remaining == 1' <<< "$snapshot" >/dev/null; then
+            python3 - "$now" "$snapshot" "$count" <<'PYCODE'
+          import json
+          import sys
+          from scripts.r11_backer.quota import can_reserve
+
+          state = json.loads(sys.argv[2])
+          if not can_reserve(state["events"], int(sys.argv[1]), "probe",
+                             total_limit=int(sys.argv[3]), paused_until=state["paused_until"]):
+              raise SystemExit("pilot rolling quota unavailable")
+          PYCODE
+          fi
+          payload=$(jq -nc --arg worker "$WORKER" --argjson now "$now" --argjson count "$count"             '{remaining:0,owner:$worker,events:[range($count) | [$now,"probe"]],paused_until:0}' | base64 -w0)
+          if gh api --method PUT "$api" -f branch="$branch" -f sha="$SEED" -f content="$payload" -f message='Claim synthetic quota' >"$RUNNER_TEMP/claim" 2>"$RUNNER_TEMP/claim-error"; then
+            result=GRANTED
+          else
+            grep -Eq 'HTTP (409|422)' "$RUNNER_TEMP/claim-error"
+            result=STALE_REJECTED
+          fi
+          state=$(gh api "$api?ref=$branch" --jq '.content | @base64d | fromjson')
+          jq -e --argjson count "$count" '.remaining == 0 and (.events | length == $count) and all(.events[]; .[1] == "probe") and (.owner == "alpha" or .owner == "beta" or .owner == "gamma")' <<< "$state" >/dev/null
+          if [[ "$result" == GRANTED ]]; then
+            jq -e --arg worker "$WORKER" '.owner == $worker' <<< "$state" >/dev/null
+          else
+            jq -e --arg worker "$WORKER" '.owner != $worker' <<< "$state" >/dev/null
+          fi
+          printf 'synthetic_claim=%s\n' "$result"
+          printf 'result=%s\n' "$result" >> "$GITHUB_OUTPUT"
+      - name: Probe uncovered windows under one reserved Backer batch
+        if: steps.claim.outputs.result == 'GRANTED'
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 -m scripts.r11_backer.dataset_pilot
+      - name: Write isolated archive with the single granted claim
+        if: steps.claim.outputs.result == 'GRANTED'
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.drive_pilot
+  drive-round-trip:
+    needs: remote-claim
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Recover the staged archive and reject late or duplicate commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: bash scripts/r11_backer/recovery_pilot.sh
+  release-sweep:
+    needs: live-read-only-preflight
+    if: needs.live-read-only-preflight.outputs.pilot == 'PASS' && contains(github.event.head_commit.message, '[r11-full-preflight]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      archive: ${{ steps.result.outputs.archive }}
+      completed: ${{ steps.result.outputs.completed }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sweep Backer contracts and benchmark five closed sessions
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_probes
+      - name: Read back the sanitized release sweep outputs
+        id: result
+        run: |
+          printf 'archive=%s\n' "$(jq -er .archive r11-release-probes.json)" >> "$GITHUB_OUTPUT"
+          printf 'completed=%s\n' "$(jq -r .dataset_sweep_complete r11-release-probes.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r11-release-probes-${{ github.run_attempt }}
+          path: r11-release-probes.json
+          if-no-files-found: error
+          retention-days: 30
+  gap-diagnostics:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-gap-preflight]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Recheck changed query windows and measure larger all-market responses
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_gaps
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-release-gaps-${{ github.run_attempt }}
+          path: r11-release-gaps.json
+          if-no-files-found: error
+          retention-days: 30
+  market-scope:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-market-test]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare bulk data with the Taiwan listing and OTC master
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 -m scripts.r11_backer.market_scope
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r11-market-scope-${{ github.run_attempt }}
+          path: r11-market-scope.json
+          if-no-files-found: error
+          retention-days: 30
+  contract-closeout:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-contract-closeout]') || contains(github.event.head_commit.message, '[r11-identity-followup]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify remaining data contracts and historical listing evidence
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          IDENTITY_ONLY: ${{ contains(github.event.head_commit.message, '[r11-identity-followup]') }}
+        run: |
+          if [[ "$IDENTITY_ONLY" == true ]]; then
+            python3 -m scripts.r11_backer.contract_closeout --identity-only
+          else
+            python3 -m scripts.r11_backer.contract_closeout
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-contract-closeout-${{ github.run_attempt }}
+          path: r11-contract-closeout.json
+          if-no-files-found: error
+          retention-days: 30
+  release-remediation:
+    name: Verify targeted Backer release improvements
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-release-remediation]') || contains(github.event.head_commit.message, '[r11-remediation-followup]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reconcile native fields, dated official closes, bounded archives, and Drive capacity
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          R11_REMEDIATION_FOLLOWUP: ${{ contains(github.event.head_commit.message, '[r11-remediation-followup]') }}
+        run: python3 -m scripts.r11_backer.release_remediation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-release-remediation-${{ github.run_attempt }}
+          path: r11-release-remediation.json
+          if-no-files-found: error
+          retention-days: 30
+  history-capacity:
+    name: Validate historical windows, publication dates and capacity
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-history-capacity]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    outputs:
+      archive: ${{ steps.history.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check real Backer periods and stage one private monthly archive
+        id: history
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.history_pilot
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-history-capacity-${{ github.run_attempt }}
+          path: r11-history-capacity.json
+          if-no-files-found: error
+          retention-days: 30
+  history-readback:
+    name: Independently verify the historical archive and month index
+    needs: [history-capacity, synthetic-checks]
+    if: needs.history-capacity.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Rebuild the month index and compare both digests
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.history_pilot --verify-only
+  history-followup:
+    name: Reconcile the early TWSE calendar and monthly revenue
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-history-followup]') || contains(github.event.head_commit.message, '[r11-calendar-retry]'))
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        if: contains(github.event.head_commit.message, '[r11-calendar-retry]')
+        with:
+          name: r11-history-followup-1
+          path: r11-prior-calendar
+          run-id: 45651767533
+          github-token: ${{ github.token }}
+      - name: Compare official historical sessions and fix period-based revenue retrieval
+        if: contains(github.event.head_commit.message, '[r11-history-followup]')
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 -m scripts.r11_backer.history_pilot --followup
+      - name: Reuse the verified index and retry only missing TWSE months
+        if: contains(github.event.head_commit.message, '[r11-calendar-retry]')
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 -m scripts.r11_backer.history_pilot --retry-calendar r11-prior-calendar/r11-twse-early-session-index.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-history-followup-${{ github.run_attempt }}
+          path: |
+            r11-history-capacity.json
+            r11-twse-early-session-index.json
+          if-no-files-found: error
+          retention-days: 30
+  tpex-market-history:
+    name: Reconcile TPEx sessions and effective market identity
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-tpex-history]') || contains(github.event.head_commit.message, '[r11-tpex-calendar-check]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official yearbook reader
+        if: contains(github.event.head_commit.message, '[r11-tpex-history]')
+        run: |
+          python3 -m venv "$RUNNER_TEMP/r11-tpex"
+          "$RUNNER_TEMP/r11-tpex/bin/python" -m pip install --disable-pip-version-check --no-deps xlrd==2.0.1
+      - name: Compare official daily evidence with Backer and stage original sources privately
+        id: reconcile
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          R11_TPEX_CALENDAR_ONLY: ${{ contains(github.event.head_commit.message, '[r11-tpex-calendar-check]') }}
+        run: |
+          if [[ "$R11_TPEX_CALENDAR_ONLY" == true ]]; then
+            python3 -m scripts.r11_backer.tpex_history --reconcile-calendar
+          else
+            "$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_history
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-tpex-history-${{ github.run_attempt }}
+          path: r11-tpex-history.json
+          if-no-files-found: error
+          retention-days: 30
+  tpex-market-readback:
+    name: Independently verify private TPEx source evidence
+    needs: [tpex-market-history, synthetic-checks]
+    if: needs.tpex-market-history.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compare official and Backer archive files against their recorded digests
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.tpex_history --verify-only
+  market-lifetime-ledger:
+    name: Reconcile official listing periods and source-specific fallback
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-lifetime-ledger]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check official listing boundaries and stage evidence in private Drive
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.market_lifetimes
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-market-lifetimes-${{ github.run_attempt }}
+          path: r11-market-lifetimes.json
+          if-no-files-found: error
+          retention-days: 30
+  market-lifetime-readback:
+    name: Verify private listing periods and fallback from Drive
+    needs: [market-lifetime-ledger, synthetic-checks]
+    if: needs.market-lifetime-ledger.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify original evidence digests and reproduce official fallback
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.market_lifetimes --verify-only
+  tpex-official-calendar:
+    name: Verify TPEx early trading dates and yearbook discrepancy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-tpex-official-calendar]') || contains(github.event.head_commit.message, '[r11-tpex-calendar-repair]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official yearbook reader
+        run: |
+          python3 -m venv "$RUNNER_TEMP/r11-tpex"
+          "$RUNNER_TEMP/r11-tpex/bin/python" -m pip install --disable-pip-version-check --no-deps xlrd==2.0.1
+      - name: Compare original market and price records and archive the result privately
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          R11_RESUME_CALENDAR: ${{ contains(github.event.head_commit.message, '[r11-tpex-calendar-repair]') && '45664576931' || '' }}
+        run: |
+          args=()
+          if [[ -n "$R11_RESUME_CALENDAR" ]]; then
+            args+=(--resume-from "$R11_RESUME_CALENDAR")
+          fi
+          "$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_calendar "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-tpex-official-calendar-${{ github.run_attempt }}
+          path: r11-tpex-history.json
+          if-no-files-found: error
+          retention-days: 30
+  tpex-official-calendar-readback:
+    name: Reproduce the TPEx calendar from private Drive sources
+    needs: [tpex-official-calendar, synthetic-checks]
+    if: needs.tpex-official-calendar.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official yearbook reader
+        run: |
+          python3 -m venv "$RUNNER_TEMP/r11-tpex"
+          "$RUNNER_TEMP/r11-tpex/bin/python" -m pip install --disable-pip-version-check --no-deps xlrd==2.0.1
+      - name: Verify archived file digests and reproduce the date reconciliation
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: '"$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_calendar --verify-only'
+  tpex-historical-closeout:
+    name: Reconcile OTC early sessions, managed stocks and listing handovers
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-tpex-closeout]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official publication readers
+        run: |
+          if ! command -v pdftotext >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq poppler-utils
+          fi
+          python3 -m venv "$RUNNER_TEMP/r11-tpex"
+          "$RUNNER_TEMP/r11-tpex/bin/python" -m pip install --disable-pip-version-check --no-deps xlrd==2.0.1
+      - name: Reconcile dated original sources and save the evidence to private Drive
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: '"$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_closeout'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-tpex-closeout-${{ github.run_attempt }}
+          path: r11-tpex-historical-closeout.json
+          if-no-files-found: error
+          retention-days: 30
+  tpex-historical-closeout-readback:
+    name: Reproduce OTC historical results from private Drive
+    needs: [tpex-historical-closeout, synthetic-checks]
+    if: needs.tpex-historical-closeout.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official publication readers
+        run: |
+          if ! command -v pdftotext >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq poppler-utils
+          fi
+          python3 -m venv "$RUNNER_TEMP/r11-tpex"
+          "$RUNNER_TEMP/r11-tpex/bin/python" -m pip install --disable-pip-version-check --no-deps xlrd==2.0.1
+      - name: Check source digests and reproduce all three reconciliations
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: '"$RUNNER_TEMP/r11-tpex/bin/python" -m scripts.r11_backer.tpex_closeout --verify-only'
+  market-listing-chronology:
+    name: Reconcile official listing archives and the 2301 code change
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-listing-chronology]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official publication readers
+        run: |
+          if ! command -v antiword >/dev/null || ! command -v pdftotext >/dev/null; then
+            if ! sudo apt-get install -y -qq antiword poppler-utils; then
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq antiword poppler-utils
+            fi
+          fi
+      - name: Check dated official evidence and save the updated pending ledger to private Drive
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.market_chronology
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-market-chronology-${{ github.run_attempt }}
+          path: r11-market-chronology.json
+          if-no-files-found: error
+          retention-days: 30
+  market-listing-chronology-readback:
+    name: Reproduce historical code and date assignments from private Drive
+    needs: [market-listing-chronology, synthetic-checks]
+    if: needs.market-listing-chronology.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the official publication readers
+        run: |
+          if ! command -v antiword >/dev/null || ! command -v pdftotext >/dev/null; then
+            if ! sudo apt-get install -y -qq antiword poppler-utils; then
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq antiword poppler-utils
+            fi
+          fi
+      - name: Verify original digests and reproduce the listing decisions
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.market_chronology --verify-only
+  twse-historical-codes:
+    name: Verify historical TWSE codes from audited annual-report pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-twse-historical-codes]') || contains(github.event.head_commit.message, '[r11-twse-code-replay]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Ensure the official PDF page extractor is available
+        if: contains(github.event.head_commit.message, '[r11-twse-historical-codes]')
+        run: |
+          if ! command -v pdfseparate >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq poppler-utils
+          fi
+      - name: Match annual-report codes, issuers and effective dates and archive the results
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          R11_TWSE_CODES_SOURCE_RUN: ${{ contains(github.event.head_commit.message, '[r11-twse-code-replay]') && '45732436894' || '' }}
+        run: |
+          args=()
+          if [[ -n "$R11_TWSE_CODES_SOURCE_RUN" ]]; then
+            args+=(--resume-from "$R11_TWSE_CODES_SOURCE_RUN")
+          fi
+          python3 -m scripts.r11_backer.twse_historical_codes "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-twse-historical-codes-${{ github.run_attempt }}
+          path: r11-twse-historical-codes.json
+          if-no-files-found: error
+          retention-days: 30
+  twse-historical-codes-readback:
+    name: Reproduce TWSE code reconciliation from private Drive
+    needs: [twse-historical-codes, synthetic-checks]
+    if: needs.twse-historical-codes.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify annual-report digests and recompute accepted and held periods
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.twse_historical_codes --verify-only
+  listing-crosscheck:
+    name: Reconcile dated exchange notices, OTC trades and bank conflicts
+    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-listing-crosscheck]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Ensure the bank report text extractor is available
+        run: |
+          if ! command -v pdftotext >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq poppler-utils
+          fi
+      - name: Verify historical case records and archive official evidence
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.listing_crosscheck
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-listing-crosscheck-${{ github.run_attempt }}
+          path: r11-listing-crosscheck.json
+          if-no-files-found: error
+          retention-days: 30
+  listing-crosscheck-readback:
+    name: Verify official listing reconciliation from private Drive
+    needs: [listing-crosscheck, synthetic-checks]
+    if: needs.listing-crosscheck.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Ensure the bank report text extractor is available
+        run: |
+          if ! command -v pdftotext >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq poppler-utils
+          fi
+      - name: Read back checksums and reproduce the decisions
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.listing_crosscheck --verify-only
+  tpex-history-reconciliation:
+    name: Reconcile complete TPEx delistings with official historical listing dates
+    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-tpex-history-reconciliation]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      archive: ${{ steps.reconcile.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reconcile complete annual page totals, legacy listings and delisting events
+        id: reconcile
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.tpex_history_reconciliation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-tpex-history-reconciliation-${{ github.run_attempt }}
+          path: r11-tpex-history-reconciliation.json
+          if-no-files-found: error
+          retention-days: 30
+  tpex-history-reconciliation-readback:
+    name: Recompute paginated TPEx history from private Drive
+    needs: [tpex-history-reconciliation, synthetic-checks]
+    if: needs.tpex-history-reconciliation.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify private sources and reproduce the reconciliation
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.tpex_history_reconciliation --verify-only
+  tpex-2001-followup:
+    name: Verify the 2001 cutover and pending cross-year cases
+    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-2001-evidence]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the PDF reader if needed
+        run: |
+          if ! command -v pdftotext >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq poppler-utils
+          fi
+      - name: Verify official records and reproduce the result from private Drive
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.r11_backer.tpex_2001_followup
+          python3 -m scripts.r11_backer.tpex_2001_followup --verify-only
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-tpex-2001-followup-${{ github.run_attempt }}
+          path: r11-tpex-2001-followup.json
+          if-no-files-found: error
+          retention-days: 30
+  combined-acceptance:
+    name: Combine Backer release checks using verified private evidence
+    if: >-
+      !cancelled() && github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
+      github.ref == 'refs/heads/codex/r11-1-backer-preflight' &&
+      needs.synthetic-checks.result == 'success' && needs.public-catalog.result == 'success' &&
+      ((contains(github.event.head_commit.message, '[r11-2001-evidence]') && needs.tpex-2001-followup.result == 'success') ||
+       (contains(github.event.head_commit.message, '[r11-combined-acceptance-test]') && needs.tpex-2001-followup.result == 'skipped'))
+    needs: [synthetic-checks, public-catalog, tpex-2001-followup]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      archive: ${{ steps.combine.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reconcile release checks, measure Drive headroom and verify the archived original
+        id: combine
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          R11_REPLAY_NEW_HISTORY: ${{ needs.tpex-2001-followup.result == 'success' }}
+        run: |
+          set -euo pipefail
+          if [[ "$R11_REPLAY_NEW_HISTORY" == true ]]; then
+            python3 -m scripts.r11_backer.combined_preflight --history-run "$GITHUB_RUN_ID" --history-attempt "$GITHUB_RUN_ATTEMPT"
+          else
+            python3 -m scripts.r11_backer.combined_preflight
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-combined-preflight-${{ github.run_attempt }}
+          path: r11-combined-preflight.json
+          if-no-files-found: error
+          retention-days: 30
+  combined-acceptance-readback:
+    name: Reproduce the combined Backer release checks from private Drive
+    needs: combined-acceptance
+    if: needs.combined-acceptance.outputs.archive == 'STAGED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify the combined receipt and its evidence references
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.combined_preflight --verify-only
+  release-readiness:
+    name: Combine Backer scope, historical contracts, storage and release gates
+    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-release-readiness]')
+    needs: [synthetic-checks, public-catalog]
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify private evidence and run the combined Backer comparisons
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_readiness
+      - name: Reproduce the measurements from Drive without API probes
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_readiness --verify-only
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-release-readiness-${{ github.run_attempt }}
+          path: r11-release-readiness.json
+          if-no-files-found: error
+          retention-days: 30
+  manifest-preview:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-manifest-test]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replay candidate evidence and exercise newest-first chronological expansion
+        run: python3 -m scripts.r11_backer.manifest_pilot
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r11-manifest-readiness-${{ github.run_attempt }}
+          path: r11-manifest-readiness.json
+          if-no-files-found: error
+          retention-days: 30
+  manifest-readback:
+    needs: manifest-preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: r11-manifest-readiness-${{ github.run_attempt }}
+      - name: Independently regenerate and compare the frozen test manifest and checks
+        run: python3 -m scripts.r11_backer.manifest_pilot --verify-only
+  integration-b00:
+    name: B00 freeze combined test manifest
+    if: >-
+      github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
+      github.ref == 'refs/heads/codex/r11-1-backer-preflight' &&
+      (contains(github.event.head_commit.message, '[r11-integration-test]') ||
+       contains(github.event.head_commit.message, '[r11-final-preflight]'))
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Seed the shared ledger and private recovery sandbox
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.integration_pilot seed
+  integration-workers:
+    name: ${{ matrix.worker }} claim and archive
+    needs: integration-b00
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [B01, B01-contender, B02, B03, B04, B05, B06, B07, B08]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Exercise lease contention and verified private Drive staging
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          R11_WORKER: ${{ matrix.worker }}
+        run: python3 -m scripts.r11_backer.integration_pilot work
+  integration-b09:
+    name: B09 recover an interrupted task
+    needs: integration-workers
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Adopt the staged archive and reject the old lease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.integration_pilot recover
+  integration-b10:
+    name: B10 independently reconcile G0-G5
+    needs: [integration-b09, synthetic-checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read back the fixed manifest and private Drive inventory
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.integration_pilot accept | tee -a "$GITHUB_STEP_SUMMARY"
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r11-integration-verdict-${{ github.run_attempt }}
+          path: r11-integration-verdict.json
+          if-no-files-found: error
+          retention-days: 30
+  final-source-probes:
+    name: Test Backer historic, middle and recent source windows together
+    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-final-preflight]')
+    needs: [synthetic-checks, public-catalog]
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run bounded sample windows and verify private Drive ZIP uploads
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.final_source_probes
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-final-source-probes-${{ github.run_attempt }}
+          path: r11-final-source-probes.json
+          if-no-files-found: error
+          retention-days: 30
+  final-preflight:
+    name: Reconcile all pre-release checks and replay a real archive
+    if: github.event_name == 'push' && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-final-preflight]')
+    needs: [integration-b10, final-source-probes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: r11-integration-verdict-${{ github.run_attempt }}
+      - name: Test real Drive collisions and archived source and gate coverage
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.final_preflight
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r11-final-preflight-${{ github.run_attempt }}
+          path: r11-final-preflight.json
+          if-no-files-found: error
+          retention-days: 30
+  paid-archive-readback:
+    needs: release-sweep
+    if: needs.release-sweep.outputs.archive == 'STAGED_PRIVATE_SAMPLES'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify paid originals in private Drive on a separate runner
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.release_probes --verify-only
+  pilot-verdict:
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && (contains(github.event.head_commit.message, '[r11-live-pilot]') || contains(github.event.head_commit.message, '[r11-full-preflight]'))
+    needs: [synthetic-checks, public-catalog, live-read-only-preflight, remote-claim, drive-round-trip, release-sweep, paid-archive-readback]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+        if: contains(github.event.head_commit.message, '[r11-full-preflight]')
+      - uses: actions/download-artifact@v4
+        if: contains(github.event.head_commit.message, '[r11-full-preflight]') && needs.release-sweep.result == 'success'
+        with:
+          name: r11-release-probes-${{ github.run_attempt }}
+      - name: Reconcile the complete release test register
+        if: contains(github.event.head_commit.message, '[r11-full-preflight]')
+        env:
+          DRIVE_ROUND_TRIP: ${{ needs.drive-round-trip.result }}
+          PRIVATE_READBACK: ${{ needs.paid-archive-readback.result }}
+        run: python3 -m scripts.r11_backer.acceptance_report
+      - uses: actions/upload-artifact@v4
+        if: contains(github.event.head_commit.message, '[r11-full-preflight]')
+        with:
+          name: r11-release-acceptance-${{ github.run_attempt }}
+          path: r11-release-acceptance.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish consolidated pilot verdict
+        env:
+          FULL_RUN: ${{ contains(github.event.head_commit.message, '[r11-full-preflight]') }}
+          SWEEP_COMPLETE: ${{ needs.release-sweep.outputs.completed }}
+          PRIVATE: ${{ needs.paid-archive-readback.result }}
+          CATALOG: ${{ needs.public-catalog.result }}
+          REGRESSION: ${{ needs.synthetic-checks.result }}
+          LIVE_JOB: ${{ needs.live-read-only-preflight.result }}
+          DRIVE_ROUND_TRIP: ${{ needs.drive-round-trip.result }}
+          REMOTE: ${{ needs.remote-claim.result }}
+          LIVE_PILOT: ${{ needs.live-read-only-preflight.outputs.pilot }}
+          DRIVE: ${{ needs.live-read-only-preflight.outputs.drive }}
+          FINMIND: ${{ needs.live-read-only-preflight.outputs.finmind }}
+          HISTORICAL: ${{ needs.live-read-only-preflight.outputs.historical }}
+          RECENT: ${{ needs.live-read-only-preflight.outputs.recent }}
+        run: |
+          verdict=HOLD
+          if [[ "$REGRESSION" == success && "$CATALOG" == success && "$LIVE_JOB" == success && "$LIVE_PILOT" == PASS && "$REMOTE" == success && "$DRIVE_ROUND_TRIP" == success ]]; then
+            verdict=PASS
+          fi
+          if [[ "$FULL_RUN" == true && ( "$SWEEP_COMPLETE" != true || "$PRIVATE" != success ) ]]; then
+            verdict=HOLD
+          fi
+          {
+            printf '## Backer pre-release pilot\n\n'
+            printf -- '- Pilot verdict: %s\n' "$verdict"
+            printf -- '- Public catalog reconciliation: %s\n' "$CATALOG"
+            printf -- '- Synthetic regression: %s\n' "$REGRESSION"
+            printf -- '- Drive metadata and target: %s\n' "${DRIVE:-NO_RESULT}"
+            printf -- '- FinMind account quota: %s\n' "${FINMIND:-NO_RESULT}"
+            printf -- '- Prior historical sample (reused): %s\n' "${HISTORICAL:-NO_RESULT}"
+            printf -- '- Prior 120-day sample (reused): %s\n' "${RECENT:-NO_RESULT}"
+            printf -- '- Cross-runner quota reservation and bounded Backer request: %s\n' "$REMOTE"
+            printf -- '- Drive synthetic archive and cross-runner recovery: %s\n' "$DRIVE_ROUND_TRIP"
+            printf -- '- Production release: HOLD (outside this pilot)\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$verdict" = PASS
+  backfill-test-history:
+    name: Backfill historical Backer evidence to private Drive
+    if: github.repository == 'danny541690/C1-PAID-DOWNLOADER' && github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' && contains(github.event.head_commit.message, '[r11-archive-backfill]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Save prior attempts, jobs, logs, reports and original-file references
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.test_archive --backfill
+  r12-cross-run-resume:
+    name: R12.1 private ledger contention and resume
+    if: >-
+      github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' &&
+      contains(github.event.head_commit.message, '[r12-cross-run]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read the existing private quota ledger, compete and reconcile
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.cross_run_ledger resume
+  archive-test-run:
+    name: Save Backer test history to private Drive
+    if: >-
+      always() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/codex/r11-1-backer-preflight' &&
+      !contains(github.event.head_commit.message, '[r12-release-batch]') &&
+      !contains(github.event.head_commit.message, '[r12-finish-preflight]') &&
+      !contains(github.event.head_commit.message, '[r12-finish-readback]') &&
+      !contains(github.event.head_commit.message, '[r12-rollout-gates]') &&
+      !contains(github.event.head_commit.message, '[r12-rollout-archive]') &&
+      !contains(github.event.head_commit.message, '[r12-production-schedule]')
+    needs:
+      - synthetic-checks
+      - public-catalog
+      - live-read-only-preflight
+      - remote-seed
+      - remote-claim
+      - drive-round-trip
+      - release-sweep
+      - gap-diagnostics
+      - market-scope
+      - contract-closeout
+      - release-remediation
+      - history-capacity
+      - history-readback
+      - history-followup
+      - tpex-market-history
+      - tpex-market-readback
+      - market-lifetime-ledger
+      - market-lifetime-readback
+      - tpex-official-calendar
+      - tpex-official-calendar-readback
+      - tpex-historical-closeout
+      - tpex-historical-closeout-readback
+      - market-listing-chronology
+      - market-listing-chronology-readback
+      - twse-historical-codes
+      - twse-historical-codes-readback
+      - listing-crosscheck
+      - listing-crosscheck-readback
+      - tpex-history-reconciliation
+      - tpex-history-reconciliation-readback
+      - tpex-2001-followup
+      - combined-acceptance
+      - combined-acceptance-readback
+      - release-readiness
+      - manifest-preview
+      - manifest-readback
+      - integration-b00
+      - integration-workers
+      - integration-b09
+      - integration-b10
+      - final-source-probes
+      - final-preflight
+      - paid-archive-readback
+      - pilot-verdict
+      - backfill-test-history
+      - r12-cross-run-resume
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive all completed test jobs and verify the Drive readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.test_archive
