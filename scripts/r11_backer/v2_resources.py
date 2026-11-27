@@ -3,14 +3,18 @@
 from collections import Counter
 from datetime import datetime, timezone
 from math import ceil
+import os
 from pathlib import Path
 import re
+from time import sleep, time
 from uuid import uuid4
 
+from . import v21_broker
 from .cross_run_ledger import DriveJournal
 from .drive_pilot import BASE, FOLDER, ensure
-from .integration_pilot import verify_private_folder
+from .integration_pilot import digest, encode, verify_private_folder
 from .live_preflight import read_json
+from .live_recovery_canary import read_json_file
 from .production_download import TERMINAL, storage_bytes, year_budget
 from .quota import NORMAL_LIMIT, ROLLING_SECONDS, TOTAL_LIMIT, can_reserve, next_reservation_at, retry_deadline
 from .release_batch import MAX_ATTEMPTS, WINDOW_LIMIT
@@ -242,3 +246,197 @@ def run(ctx):
               "actual_data_requests": 0, "actual_account_requests": 0}
     return {"status": "HOLD", "reason": "RESOURCE_EVIDENCE_INCOMPLETE", "blockers": blockers,
             "outputs": {"RESOURCE_BUDGET.json": report, "PROBE_LEDGER.json": evidence}}
+
+
+def _checkpoint_v21(ctx):
+    genesis = v21_broker.new_state(ctx.spec_sha, ctx.prior("PROBE_LEDGER.json"), ctx.prior("FINAL_READINESS.json"))
+    folder = ensure(ctx.task_root, "ISOLATED_ACCOUNT_QUOTA_BROKER", FOLDER, ctx.access, create=True)
+    verify_private_folder(folder, ctx.access)
+    journal = DriveJournal(folder, ctx.access)
+    record = journal.head()
+    if record is None:
+        journal.initialize(genesis)
+        record = journal.version(0)
+    if record is None:
+        raise ValueError("BROKER_CHECKPOINT_NOT_VISIBLE")
+    v21_broker.validate_checkpoint(record["state"], genesis)
+    return journal, record, {"status": "READ_BACK", "folder_id": folder, "sequence": record["sequence"]}
+
+
+def _ledger_v21(ctx):
+    base = {"data_request_limit_including_retries": TASK_LIMITS["download"],
+            "account_request_limit": TASK_LIMITS["probe"]}
+    try:
+        _, record, checkpoint = _checkpoint_v21(ctx)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
+        return base | {"checkpoint": {"status": "HOLD", "error": type(error).__name__},
+                       "events": [], "reserved_data_requests": None, "reserved_account_requests": None,
+                       "actual_data_requests": None, "actual_account_requests": None,
+                       "new_actual_data_requests": 0, "new_actual_account_requests": 0}
+    state = record["state"]
+    reservations = Counter(event["kind"] for event in state["events"])
+    actual = Counter()
+    for event in state["events"]:
+        if result := state["results"].get(event["request_id"]):
+            actual[event["kind"]] += result["actual_requests"]
+    return state | base | {"checkpoint": checkpoint,
+                           "reserved_data_requests": reservations["download"],
+                           "reserved_account_requests": reservations["probe"],
+                           "new_actual_data_requests": actual["download"],
+                           "new_actual_account_requests": actual["probe"],
+                           "actual_data_requests": state["prior_actual"]["data"] + actual["download"],
+                           "actual_account_requests": state["prior_actual"]["account"] + actual["probe"]}
+
+
+def _admission_v21(ctx, sharing):
+    """Read independent, task-bound proof and confirm it covers every known consumer."""
+    try:
+        proof = read_json_file(ctx.shared, "BACKER_ACCOUNT_ADMISSION.json", ctx.access)
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+        proof = {}
+    actual_consumers = set(sharing["same_repository_secret_workflows"])
+    if (not isinstance(proof, dict) or proof.get("task_id") != ctx.task_id or
+            proof.get("spec_sha") != ctx.spec_sha or not v21_broker.sha(proof.get("account_ownership_evidence_sha256")) or
+            proof.get("all_consumers_in_broker") is not True or
+            proof.get("exclusive_account_lease_read_back") is not True or
+            not isinstance(proof.get("consumer_workflows"), list) or
+            not actual_consumers <= set(proof["consumer_workflows"]) or
+            not isinstance(proof.get("shared_events"), list) or
+            type(proof.get("lease_expires_at")) is not int or proof["lease_expires_at"] <= int(time()) + 25):
+        return {}, ["EXTERNAL_ACCOUNT_CONSUMERS_AND_BROKER_OWNERSHIP_UNVERIFIED",
+                    "CURRENT_PROVIDER_HEADROOM_EVIDENCE_UNAVAILABLE"]
+    return proof, []
+
+
+def probe_v21(ctx):
+    """Run only the account-info request after durable quota admission, with bounded transport retries."""
+    sharing = token_workflows()
+    ledger = _ledger_v21(ctx)
+    admission, blockers = _admission_v21(ctx, sharing)
+    if sharing["unproven_shared_group"]:
+        blockers.append("REPOSITORY_BACKER_CONSUMERS_OUTSIDE_SHARED_GROUP")
+    if ledger["checkpoint"]["status"] != "READ_BACK":
+        blockers.append("TASK_QUOTA_CHECKPOINT_UNVERIFIED")
+    outcome = {}
+    for index in range(TASK_LIMITS["probe"]) if not blockers else ():
+        if admission["lease_expires_at"] <= int(time()) + 25:
+            blockers.append("ACCOUNT_LEASE_DEADLINE")
+            break
+        journal, record, _ = _checkpoint_v21(ctx)
+        outcome = v21_broker.account_probe(journal, record, now=int(time()), run=ctx.run,
+                                           request_id=f"account-{ctx.run}-{ctx.attempt}-{index}",
+                                           admission=admission, token=os.environ.get("FINMIND_BACKER_TOKEN"))
+        if outcome["status"] == "PROVIDER_LIMIT_OBSERVED":
+            break
+        retryable = (outcome["status"] == "HOLD_PROVIDER_HTTP" and
+                     (outcome.get("status_code") == 408 or 500 <= outcome.get("status_code", 0) < 600) or
+                     outcome["status"] == "HOLD_PROVIDER_RESPONSE" and outcome.get("transient") is True)
+        if not retryable or index == TASK_LIMITS["probe"] - 1:
+            blockers.append(outcome["status"])
+            break
+        sleep(2 ** index)
+    ledger = _ledger_v21(ctx)
+    status = "HOLD" if blockers else "PASS"
+    expiry = admission.get("subscription_expiry", {})
+    expiry = expiry if isinstance(expiry, dict) and v21_broker.sha(expiry.get("evidence_sha256")) else {}
+    report = {"admission": "HOLD_ACCOUNT_PROBE" if blockers else "PROVIDER_LIMIT_OBSERVED",
+              "blocked_on": blockers, "sharing": sharing,
+              "observed_drive": observed_drive(ctx.access), "checkpoint": ledger["checkpoint"],
+              "actual_data_requests": ledger["actual_data_requests"], "actual_account_requests": ledger["actual_account_requests"],
+              "provider_entitlement": {"live_account_status": outcome.get("status", "HOLD_ACCOUNT_PROBE"),
+                                       "api_request_limit": outcome.get("api_request_limit"),
+                                       "user_count": outcome.get("user_count"), "subscription_expiry": expiry.get("date"),
+                                       "outcome_sha256": digest(encode(outcome)) if outcome else None},
+              "provider_endpoints": {"live_account_probe": "user_info",
+                                     "provider_reference": "https://finmind.github.io/api_usage_count/"}}
+    return {"status": status, "blockers": blockers,
+            "outputs": {"PROBE_PREFLIGHT.json": report}}
+
+
+def _right_sized_campaign(campaign):
+    """Return measured-payload scenarios and the enforced byte-envelope ceiling."""
+    remaining = campaign["remaining_plan_windows"]
+    final_sample = ceil(remaining * (campaign["mean_packed_bytes_per_verified_window"] or 0))
+    reserve = campaign["remaining_capacity_components"]["journal_and_receipt_reserve_bytes"]
+    prior_requests = campaign["closed_source_requests"]
+    closed = campaign["closed_windows"]
+    base_requests = max(remaining, min(remaining * MAX_ATTEMPTS, ceil(remaining * prior_requests / closed))) if closed else None
+    low_storage = final_sample * 2 + reserve if final_sample or not remaining else None
+    base_storage = final_sample + ceil(final_sample * base_requests / remaining) + reserve if (final_sample and
+                   base_requests is not None and remaining) else None
+    if not remaining:
+        base_storage = 0
+    return {
+        "scope": campaign["scope"],
+        "assumptions": {"payload_baseline": "OBSERVED_PACKED_MEAN_FOR_CURRENT_CAMPAIGN",
+                        "request_baseline": "OBSERVED_CLOSED_CAMPAIGN_REQUESTS_PER_CLOSED_WINDOW",
+                        "retry_byte_envelope": "CURRENT_MANIFEST_LIMIT_AND_EXISTING_JOURNAL_RESERVE",
+                        "hours": "SOURCE_ONLY_AT_CONFIGURED_1200_CAP_SCENARIO",
+                        "runner_minutes": "UNVERIFIED_STORAGE_AND_RUNNER_THROUGHPUT",
+                        "additional_paid_plan_purchases_authorized": 0,
+                        "provider_subscription_cost": "UNOBSERVED_EXISTING_PLAN"},
+        "low": {"source_requests": remaining, "estimated_storage_bytes": low_storage,
+                "source_only_hours_at_configured_cap": ceil(remaining / NORMAL_LIMIT)},
+        "baseline": {"source_requests": base_requests, "estimated_storage_bytes": base_storage,
+                     "source_only_hours_at_configured_cap": ceil(base_requests / NORMAL_LIMIT)
+                     if base_requests is not None else None},
+        "conservative": {"source_requests": campaign["if_all_remaining_use_maximum_source_attempts"],
+                         "storage_bound_bytes": campaign["remaining_storage_bound_bytes"],
+                         "source_only_hours_at_configured_cap":
+                         campaign["source_only_hours_at_normal_cap_under_max_attempts_scenario"]},
+    }
+
+
+def run_v21(ctx):
+    """Reconcile the new historical manifest and the earlier admission result."""
+    drive = observed_drive(ctx.access)
+    ledger = _ledger_v21(ctx)
+    blockers = []
+    try:
+        admission = ctx.read("PROBE_PREFLIGHT.json")
+        blockers.extend(admission["blocked_on"])
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
+        admission = {"error": type(error).__name__}
+        blockers.append("PROBE_PREFLIGHT_EVIDENCE_UNAVAILABLE")
+    if ledger["checkpoint"]["status"] != "READ_BACK":
+        blockers.append("TASK_QUOTA_CHECKPOINT_UNVERIFIED")
+    try:
+        coverage = ctx.read("MANIFEST_INDEX.json")
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+        coverage = {}
+        blockers.append("INCREMENTAL_MANIFEST_EVIDENCE_UNAVAILABLE")
+    try:
+        campaign = campaign_forecast(ctx.plan, ctx.supplement, ctx.master, drive["available_bytes"], coverage)
+        scenario = _right_sized_campaign(campaign)
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
+        campaign, scenario = {"error": type(error).__name__}, None
+        blockers.append("LIMITED_CAMPAIGN_INPUT_UNAVAILABLE")
+    if campaign.get("remaining_storage_bound_fits_observed_headroom") is not True:
+        blockers.append("LIMITED_CAMPAIGN_REMAINING_STORAGE_UNPROVEN_OR_INSUFFICIENT")
+    full_denom = coverage.get("full_history_denominator")
+    if full_denom is None:
+        blockers.append("FULL_HISTORY_DENOMINATOR_UNPROVEN")
+    entitlement = admission.get("provider_entitlement", {})
+    if not entitlement.get("subscription_expiry"):
+        blockers.append("PROVIDER_SUBSCRIPTION_EXPIRY_EVIDENCE_MISSING")
+    full_forecast = coverage.get("verified_full_history_forecast") or {}
+    if full_denom is None or not all(type(full_forecast.get(k)) is int and full_forecast[k] >= 0 for k in (
+        "source_requests", "storage_bytes", "runner_minutes", "forecast_cost", "elapsed_hours",
+    )):
+        blockers.append("FULL_HISTORY_COST_DURATION_AND_STORAGE_UNVERIFIED")
+    report = {"drive_storage": drive, "limited_campaign": campaign, "right_sized_limited_campaign": scenario,
+              "probe_preflight": admission, "blocked_on": list(dict.fromkeys(blockers)),
+              "full_history": {"denominator": full_denom,
+                               "known_bounded_request_floor": coverage.get("bounded_request_floor"),
+                               "known_bounded_historical_windows": coverage.get("historical_candidate_windows"),
+                               "known_candidate_windows": coverage.get("candidate_windows"),
+                               "source_requests": full_forecast.get("source_requests"),
+                               "storage_bytes": full_forecast.get("storage_bytes"),
+                               "runner_minutes": full_forecast.get("runner_minutes"),
+                               "forecast_cost": full_forecast.get("forecast_cost"), "elapsed_hours": full_forecast.get("elapsed_hours")},
+              "provider_entitlement": {"subscription_expiry": entitlement.get("subscription_expiry"),
+                                       "needed_evidence": "FinMind會員有效截止日或同一帳號含有效期的付款憑證"},
+              "actual_data_requests": ledger["new_actual_data_requests"],
+              "actual_account_requests": ledger["new_actual_account_requests"]}
+    return {"status": "HOLD" if blockers else "PASS", "blockers": report["blocked_on"],
+            "outputs": {"RESOURCE_BUDGET.json": report, "PROBE_LEDGER.json": ledger}}

@@ -1,0 +1,183 @@
+name: R12.1 G03–G05 Incremental Closeout V2.1
+on:
+  push:
+    branches: [codex/r12-final-readiness-v2]
+    paths:
+      - .github/workflows/r12-incremental-closeout.yml
+      - scripts/r11_backer/incremental_closeout_v21.py
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: r12-1-bounded-preflight
+  cancel-in-progress: false
+env:
+  R12_TASK_ID: R12-FINAL-READINESS-V2-01
+  R12_SPEC_SHA: c83f8916d9559cba7638193bd5e206498f085ba8648337a685aeb2a5548b4271
+jobs:
+  LOCK:
+    if: ${{ contains(github.event.head_commit.message, '[r12-closeout-v21]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Record LOCK private evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.incremental_closeout_v21 LOCK
+  H:
+    needs: [LOCK]
+    if: ${{ always() && !cancelled() && contains(github.event.head_commit.message, '[r12-closeout-v21]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record H private evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.incremental_closeout_v21 H
+  G03:
+    needs: [LOCK]
+    if: ${{ always() && !cancelled() && contains(github.event.head_commit.message, '[r12-closeout-v21]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record G03 private evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.incremental_closeout_v21 G03
+  G05_PROBE:
+    needs: [LOCK]
+    if: ${{ always() && !cancelled() && contains(github.event.head_commit.message, '[r12-closeout-v21]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record G05_PROBE private evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: python3 -m scripts.r11_backer.incremental_closeout_v21 G05_PROBE
+  G04:
+    needs: [G03]
+    if: ${{ always() && !cancelled() && contains(github.event.head_commit.message, '[r12-closeout-v21]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record G04 private evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.incremental_closeout_v21 G04
+  G05:
+    needs: [G04, G05_PROBE]
+    if: ${{ always() && !cancelled() && contains(github.event.head_commit.message, '[r12-closeout-v21]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record G05 private evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.incremental_closeout_v21 G05
+  G06:
+    needs: [G03, G04, G05]
+    if: ${{ always() && !cancelled() && contains(github.event.head_commit.message, '[r12-closeout-v21]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run changed-interface unit regressions
+        run: |
+          for suite in test_r12_v2_contracts.py test_r12_v2_resources.py test_r12_release_batch.py 'test_r12_v21*.py'; do
+            python3 -m unittest discover -s tests -p "$suite"
+          done
+      - name: Record G06 private evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.incremental_closeout_v21 G06
+  G07_STAGE:
+    needs: [G06]
+    if: ${{ always() && !cancelled() && contains(github.event.head_commit.message, '[r12-closeout-v21]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record G07_STAGE private evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.incremental_closeout_v21 G07_STAGE
+  G07:
+    needs: [G07_STAGE]
+    if: ${{ always() && !cancelled() && contains(github.event.head_commit.message, '[r12-closeout-v21]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record G07 private evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.incremental_closeout_v21 G07
+  G08:
+    needs: [LOCK, H, G03, G04, G05_PROBE, G05, G06, G07_STAGE, G07]
+    if: ${{ always() && !cancelled() && contains(github.event.head_commit.message, '[r12-closeout-v21]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record G08 private evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.incremental_closeout_v21 G08

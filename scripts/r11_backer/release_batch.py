@@ -26,7 +26,7 @@ from .live_bronze_admission import advance, fetch_original
 from .live_preflight import drive_health, read_json
 from .live_recovery_canary import month_folder, read_json_file, write_json
 from .manifest_pilot import manifest_windows, sample_data, serial_window
-from .quota import NORMAL_LIMIT, TOTAL_LIMIT, can_reserve, retry_deadline
+from .quota import AUTH_BLOCK_CODES, NORMAL_LIMIT, QUOTA_BLOCK_CODES, TOTAL_LIMIT, can_reserve, provider_block_code, retry_deadline
 from .release_probes import MAX_BYTES, Task, read_private_file
 from .release_readiness import ACCOUNT
 from .release_rehearsal import RehearsalError, require, root_folder
@@ -245,15 +245,16 @@ def account_check(journal, record, run, auth):
     try:
         reply = read_json(ACCOUNT, auth)
     except HTTPError as error:
-        if error.code == 429:
+        if error.code in QUOTA_BLOCK_CODES:
             pause = retry_deadline(error.headers.get("Retry-After") if error.headers else None, now)
             return advance(journal, record, pause=pause, account=None)
-        if error.code in (401, 403):
+        if error.code in AUTH_BLOCK_CODES:
             return advance(journal, record, auth_hold=True, account=None)
         raise
-    if reply.get("status") == 429:
-        return advance(journal, record, pause=retry_deadline(None, now), account=None)
-    if reply.get("status") in (401, 403):
+    code = provider_block_code(reply.get("status"))
+    if code in QUOTA_BLOCK_CODES:
+        return advance(journal, record, pause=retry_deadline(reply.get("retry_after"), now), account=None)
+    if code in AUTH_BLOCK_CODES:
         return advance(journal, record, auth_hold=True, account=None)
     limit, used = reply.get("api_request_limit"), reply.get("user_count")
     require(type(limit) is int and limit >= TOTAL_LIMIT and type(used) is int and 0 <= used <= limit,
@@ -300,8 +301,8 @@ def receive(manifest, item, task, access, auth):
         raw = fetch_original(auth, task_for(item), byte_limit=WINDOW_LIMIT)
         require(len(raw) <= WINDOW_LIMIT, "SIZE_LIMIT")
         result = json.loads(raw)
-        if isinstance(result, dict) and result.get("status") in (401, 403, 429):
-            return ("HTTP", result["status"], None)
+        if isinstance(result, dict) and (code := provider_block_code(result.get("status"))):
+            return ("HTTP", code, result.get("retry_after"))
         packed, _, _ = compress_original(raw)
         proof = proof_for(item, packed, raw)
     except HTTPError as error:
@@ -368,12 +369,12 @@ def dispatch(manifest, record, journal, access, run, *, request_ceiling=None, wo
                     continue
                 if status == "STAGED":
                     tasks[key] = tasks[key] | {"status": "STAGED", "proof": outcome}
-                elif status == "RETRY" or status == "HTTP" and outcome in (408, 429, 500, 502, 503, 504):
-                    if outcome == 429:
+                elif status == "RETRY" or status == "HTTP" and outcome in QUOTA_BLOCK_CODES | {408, 500, 502, 503, 504}:
+                    if outcome in QUOTA_BLOCK_CODES:
                         pause = max(pause, retry_deadline(after, int(time())))
                     tasks[key] = retry_state(tasks[key], str(outcome), int(time()))
                 else:
-                    auth_hold |= outcome in (401, 403)
+                    auth_hold |= outcome in AUTH_BLOCK_CODES
                     tasks[key] = tasks[key] | {"status": "BLOCKED", "reason": str(outcome)}
         record = advance(journal, record, tasks=tasks, pause=pause, auth_hold=auth_hold)
         if remaining is not None:

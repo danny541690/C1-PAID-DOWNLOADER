@@ -21,7 +21,7 @@ from .live_bronze_admission import advance, fetch_original
 from .live_preflight import drive_health
 from .live_recovery_canary import month_folder, read_json_file, write_json
 from .manifest_pilot import sample_data
-from .quota import NORMAL_LIMIT, can_reserve, retry_deadline
+from .quota import AUTH_BLOCK_CODES, NORMAL_LIMIT, QUOTA_BLOCK_CODES, can_reserve, provider_block_code, retry_deadline
 from .reconcile_catalog import BACKER_COMPATIBLE
 from .release_batch import account_check, stored_event, proof_for
 from .release_probes import MAX_BYTES, SCOPE_HOLDS, Sample, Task, contracts, observation_date, read_private_file
@@ -273,12 +273,12 @@ def read_source(task, entry, auth):
         obj = json.loads(raw)
         if not isinstance(obj, dict):
             return Sample("INVALID_REPLY"), None
-        code = obj.get("status")
-        if code == 429:
-            return Sample("RATE_LIMITED"), None
-        if code in (401, 403):
+        code = provider_block_code(obj.get("status"))
+        if code in QUOTA_BLOCK_CODES:
+            return Sample("RATE_LIMITED"), obj.get("retry_after")
+        if code in AUTH_BLOCK_CODES:
             return Sample("ACCESS_DENIED"), None
-        if code != 200 or set(obj) - {"msg", "status", "data"}:
+        if obj.get("status") != 200 or set(obj) - {"msg", "status", "data"}:
             return Sample("STATUS_OR_PAGINATION"), None
         rows = obj.get("data")
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
@@ -301,9 +301,9 @@ def read_source(task, entry, auth):
         result = "VALID_SAMPLE" if all(set(entry["fields"]) <= row.keys() for row in rows) else "FIELD_DIFFERENCES"
         return Sample(result, raw=raw, rows=tuple(rows)), None
     except HTTPError as error:
-        if error.code == 429:
+        if error.code in QUOTA_BLOCK_CODES:
             return Sample("RATE_LIMITED"), error.headers.get("Retry-After") if error.headers else None
-        if error.code in (401, 403):
+        if error.code in AUTH_BLOCK_CODES:
             return Sample("ACCESS_DENIED"), None
         return Sample("TRANSIENT" if error.code in (408, 500, 502, 503, 504) else "HTTP_REJECTED"), None
     except RehearsalError:
