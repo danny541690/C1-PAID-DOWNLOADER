@@ -53,6 +53,7 @@ class ReservedDriveIDTests(unittest.TestCase):
         conflict = HTTPError("https://example.invalid", 409, "exists", {}, None)
         with (patch.object(drive_pilot, "find", return_value=None),
               patch.object(drive_pilot, "build_opener") as opener,
+              patch.object(drive_pilot, "read_drive_bytes", return_value=b"raw"),
               patch.object(drive_pilot, "read_json", return_value=metadata) as get):
             opener.return_value.open.side_effect = conflict
             self.assertEqual(drive_pilot.ensure("parent", "original.json.gz", "application/gzip", "fixture",

@@ -78,21 +78,29 @@ class DriveJournal:
                                            "state": state}, self.access)
         require(self.version(0)["state"] == state, "GENESIS_STATE_MISMATCH")
 
-    def version(self, sequence=None):
-        """Read a specific revision, or the latest committed revision."""
+    def history(self):
+        """Yield each committed revision after validating its predecessor hash."""
         entry = find(self.parent, self.name(0), self.access)
         if entry is None:
-            return None
+            return
         current = self.load(entry["id"], 0)
         require(current is not None and current["previous"] is None, "JOURNAL_GENESIS")
+        yield current
         for number in count(1):
-            if sequence == current["sequence"]:
-                return current
             following = self.load(current["next_id"], number)
             if following is None:
-                return current if sequence is None else None
+                return
             require(following["previous"] == digest(encode(current)), "JOURNAL_PREDECESSOR")
             current = following
+            yield current
+
+    def version(self, sequence=None):
+        """Read a specific revision, or the latest committed revision."""
+        current = None
+        for current in self.history():
+            if sequence == current["sequence"]:
+                return current
+        return current if sequence is None else None
 
     def append(self, previous, state):
         sequence = previous["sequence"] + 1
@@ -101,7 +109,7 @@ class DriveJournal:
                 "state": state}
         # Both contenders POST to the same reserved ID. An existing object is read after a 409.
         ensure(self.parent, self.name(sequence), "application/json", self.access, encode(body),
-               create=True, file_id=fixed, lookup=False)
+               create=True, file_id=fixed, lookup=False, read_winner=True)
         observed = until(lambda: self.load(fixed, sequence), "JOURNAL_WRITE_READBACK")
         require(observed["previous"] == body["previous"], "JOURNAL_WRITE_PREDECESSOR")
         return observed["state"] == state

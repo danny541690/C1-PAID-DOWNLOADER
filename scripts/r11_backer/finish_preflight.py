@@ -21,7 +21,7 @@ from .live_bronze_admission import advance, fetch_original
 from .live_preflight import drive_health
 from .live_recovery_canary import month_folder, read_json_file, write_json
 from .manifest_pilot import sample_data
-from .quota import can_reserve, retry_deadline
+from .quota import NORMAL_LIMIT, can_reserve, retry_deadline
 from .reconcile_catalog import BACKER_COMPATIBLE
 from .release_batch import account_check, stored_event, proof_for
 from .release_probes import MAX_BYTES, SCOPE_HOLDS, Sample, Task, contracts, observation_date, read_private_file
@@ -316,7 +316,7 @@ def read_source(task, entry, auth):
 
 def wave_keys(state, now):
     account = state.get("account")
-    if not account or now < state["pause"] or not 0 <= now - account["at"] <= 150:
+    if not account or state.get("auth_hold") or now < state["pause"] or not 0 <= now - account["at"] <= 150:
         return []
     remaining = account["headroom"] - (len(state["events"]) - account["first_event"])
     events = [(entry["at"], entry["kind"]) for entry in state["events"]]
@@ -326,7 +326,7 @@ def wave_keys(state, now):
             break
         if entry["status"] != "READY" or entry.get("retry_at", 0) > now:
             continue
-        if not can_reserve(events, now, "download", normal_limit=account["limit"], total_limit=account["limit"],
+        if not can_reserve(events, now, "download", normal_limit=min(NORMAL_LIMIT, account["limit"]), total_limit=account["limit"],
                            paused_until=state["pause"]):
             break
         selected.append(key)
@@ -340,15 +340,18 @@ def finish_wave(root, journal, record, access, result):
     require(set(result["outcomes"]) == set(state["inflight"]), "WAVE_OUTCOME_MEMBERSHIP")
     now = int(time())
     pause = state["pause"]
+    auth_hold = state.get("auth_hold", False)
     for key, item in result["outcomes"].items():
         status = item["status"]
+        auth_hold |= status == "ACCESS_DENIED"
         if status == "RATE_LIMITED":
             pause = max(pause, retry_deadline(item["retry_after"], item["received_at"]))
         if status in ("TRANSIENT", "RATE_LIMITED", "INTERRUPTED") and tasks[key]["attempts"] < 4:
             tasks[key] = tasks[key] | {"status": "READY", "retry_at": max(now + 2 ** tasks[key]["attempts"], pause)}
         else:
             tasks[key] = tasks[key] | {"status": status, "proof": item.get("proof")}
-    return advance(journal, record, tasks=tasks, inflight=[], pause=pause, packets=state["packets"] + result["packets"])
+    return advance(journal, record, tasks=tasks, inflight=[], pause=pause, auth_hold=auth_hold,
+                   packets=state["packets"] + result["packets"])
 
 
 def recover_wave(root, sequence, inflight, access):

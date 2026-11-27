@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import asdict
 from datetime import date, timedelta
 import gzip
+from http.client import IncompleteRead
 from io import BytesIO
 import json
 import os
@@ -18,13 +19,14 @@ from .archive import compress_original
 from .cross_run_ledger import DriveJournal
 from .dispatch import Window
 from .drive_pilot import FOLDER, ROOT, ensure, find, token
+from .drive_retry import error_class, operation_scope, transient
 from .history_pilot import BUSINESS, BUSINESS_START, NDC_PERIOD, read_verified_history_archive, twse_month
 from .integration_pilot import digest, encode, verify_private_folder
 from .live_bronze_admission import advance, fetch_original
 from .live_preflight import drive_health, read_json
 from .live_recovery_canary import month_folder, read_json_file, write_json
 from .manifest_pilot import manifest_windows, sample_data, serial_window
-from .quota import TOTAL_LIMIT, can_reserve, retry_deadline
+from .quota import NORMAL_LIMIT, TOTAL_LIMIT, can_reserve, retry_deadline
 from .release_probes import MAX_BYTES, Task, read_private_file
 from .release_readiness import ACCOUNT
 from .release_rehearsal import RehearsalError, require, root_folder
@@ -185,7 +187,7 @@ def stage_name(key, attempt):
     return f"{key}-{attempt}.json.gz"
 
 
-def stage_read(manifest, item, state, access):
+def stage_read(manifest, item, state, access, *, proof=None):
     key = item["task_id"]
     if "source_file_id" in item:
         file_id = item["source_file_id"]
@@ -194,10 +196,10 @@ def stage_read(manifest, item, state, access):
                          access, create=False, file_id=state["stage_id"])
     verify_private_folder(file_id, access)
     packed = read_private_file(file_id, access)
-    proof = proof_for(item, packed)
+    observed = (proof or proof_for)(item, packed)
     expected = item.get("archived_proof", state.get("proof"))
-    require(expected is None or proof == expected, "STAGED_PROOF")
-    return packed, proof
+    require(expected is None or observed == expected, "STAGED_PROOF")
+    return packed, observed
 
 
 def retry_state(task, outcome, now):
@@ -207,7 +209,7 @@ def retry_state(task, outcome, now):
     return state | {"status": "READY", "retry_after": now + 2 ** min(task["attempts"], 3)}
 
 
-def recover_pending(manifest, state, access):
+def recover_pending(manifest, state, access, *, proof=None):
     updated = deepcopy(state["tasks"])
     now = int(time())
     for row in manifest["items"]:
@@ -218,8 +220,8 @@ def recover_pending(manifest, state, access):
         if find(manifest["stage"], stage_name(key, task["attempts"]), access) is None:
             updated[key] = retry_state(task, "INTERRUPTED_REQUEST", now)
             continue
-        _, proof = stage_read(manifest, row, task, access)
-        updated[key] = task | {"status": "STAGED", "proof": proof, "recovered": True}
+        _, observed = stage_read(manifest, row, task, access, proof=proof)
+        updated[key] = task | {"status": "STAGED", "proof": observed, "recovered": True}
     return updated
 
 
@@ -236,8 +238,7 @@ def account_check(journal, record, run, auth):
     if account is not None and 0 <= now - account["at"] <= 150:
         return record
     events = state["events"]
-    if not can_reserve([(e["at"], e["kind"]) for e in events], now, "probe", total_limit=TOTAL_LIMIT,
-                       normal_limit=TOTAL_LIMIT, paused_until=state["pause"]):
+    if not can_reserve([(e["at"], e["kind"]) for e in events], now, "probe", paused_until=state["pause"]):
         return record
     record = advance(journal, record, events=events + [stored_event(run, "probe", now)])
     print("finmind_account_request=1")
@@ -276,13 +277,22 @@ def ready_wave(items, state, now, *, worker_limit=None, lane_limit=1):
         if (lanes[row["lane"]] >= lane_limit or task["status"] != "READY"
                 or task.get("retry_after", 0) > now):
             continue
-        if not can_reserve(events, now, "download", normal_limit=account["limit"],
+        if not can_reserve(events, now, "download", normal_limit=min(NORMAL_LIMIT, account["limit"]),
                            total_limit=account["limit"], paused_until=state["pause"]):
             break
         selected.append(row)
         lanes[row["lane"]] += 1
         events.append((now, "download"))
     return selected
+
+
+def stage_original(manifest, item, task, access, packed):
+    name = stage_name(item["task_id"], task["attempts"])
+    file_id = ensure(manifest["stage"], name, "application/gzip", access, packed,
+                     create=True, file_id=task["stage_id"])
+    verify_private_folder(file_id, access)
+    require(read_private_file(file_id, access) == packed, "STAGING_BYTES")
+    return file_id
 
 
 def receive(manifest, item, task, access, auth):
@@ -302,11 +312,7 @@ def receive(manifest, item, task, access, auth):
         return ("RETRY", "NETWORK_OR_TIMEOUT", None)
     except ValueError:
         return ("HOLD", "INVALID_REPLY", None)
-    name = stage_name(item["task_id"], task["attempts"])
-    file_id = ensure(manifest["stage"], name, "application/gzip", access, packed,
-                     create=True, file_id=task["stage_id"])
-    verify_private_folder(file_id, access)
-    require(read_private_file(file_id, access) == packed, "STAGING_BYTES")
+    stage_original(manifest, item, task, access, packed)
     return ("STAGED", proof, None)
 
 
@@ -367,7 +373,7 @@ def dispatch(manifest, record, journal, access, run, *, request_ceiling=None, wo
                         pause = max(pause, retry_deadline(after, int(time())))
                     tasks[key] = retry_state(tasks[key], str(outcome), int(time()))
                 else:
-                    auth_hold |= outcome == 401
+                    auth_hold |= outcome in (401, 403)
                     tasks[key] = tasks[key] | {"status": "BLOCKED", "reason": str(outcome)}
         record = advance(journal, record, tasks=tasks, pause=pause, auth_hold=auth_hold)
         if remaining is not None:
@@ -376,33 +382,45 @@ def dispatch(manifest, record, journal, access, run, *, request_ceiling=None, wo
                 return record
 
 
-def accept_item(manifest, item, task, parent, access):
+def accept_item(manifest, item, task, parent, access, *, proof=None):
+    with operation_scope("B10", item["task_id"]):
+        return _accept_item(manifest, item, task, parent, access, proof or proof_for)
+
+
+def _accept_item(manifest, item, task, parent, access, proof):
     if task["status"] == "VERIFIED":
         receipt = task["receipt"]
         file_id = ensure(parent, item["name"], "application/gzip", access, create=False,
                          file_id=item["destination_id"])
         verify_private_folder(file_id, access)
-        require(receipt["file_id"] == file_id and proof_for(item, read_private_file(file_id, access)) == receipt["proof"],
+        require(receipt["file_id"] == file_id and proof(item, read_private_file(file_id, access)) == receipt["proof"],
                 "EXISTING_RECEIPT_CHANGED")
         return task
     try:
-        packed, proof = stage_read(manifest, item, task, access)
+        packed, observed = stage_read(manifest, item, task, access, proof=proof)
         file_id = ensure(parent, item["name"], "application/gzip", access, packed, create=True,
                          file_id=item["destination_id"])
         verify_private_folder(file_id, access)
         saved = read_private_file(file_id, access)
-        require(proof_for(item, saved) == proof and saved == packed, "BRONZE_READBACK")
-        return task | {"status": "VERIFIED", "receipt": {"file_id": file_id, "proof": proof}}
+        require(proof(item, saved) == observed and saved == packed, "BRONZE_READBACK")
+        return task | {"status": "VERIFIED", "receipt": {"file_id": file_id, "proof": observed}}
     except (RehearsalError, ValueError, RuntimeError):
         return task | {"status": "BLOCKED", "reason": "BRONZE_VALIDATION"}
-    except OSError:
+    except (OSError, IncompleteRead) as error:
+        if not transient(error):
+            if isinstance(error, HTTPError) and error.code in (401, 403):
+                raise
+            return task | {"status": "BLOCKED", "reason": "BRONZE_READBACK_" + error_class(error)}
         attempts = task.get("accept_attempts", 0) + 1
+        event = {"attempt": attempts, "class": error_class(error)}
         if attempts >= MAX_ATTEMPTS:
-            return task | {"accept_attempts": attempts, "status": "REPAIR", "reason": "BRONZE_READBACK_RETRIES"}
-        return task | {"accept_attempts": attempts, "reason": "BRONZE_RETRY_PENDING"}
+            return task | {"accept_attempts": attempts, "accept_error": event,
+                           "status": "REPAIR", "reason": "BRONZE_READBACK_RETRIES"}
+        return task | {"accept_attempts": attempts, "accept_error": event, "reason": "BRONZE_RETRY_PENDING"}
 
 
-def accept(manifest, record, journal, access, *, audit=False, workers=1, reread_verified=True):
+def accept(manifest, record, journal, access, *, audit=False, workers=1, reread_verified=True,
+           proof=None, resolve_destination=None):
     tasks = deepcopy(record["state"]["tasks"])
     parents, selected = {}, []
     for item in manifest["items"]:
@@ -412,17 +430,19 @@ def accept(manifest, record, journal, access, *, audit=False, workers=1, reread_
             continue
         month = item["start"][:7]
         if month not in parents:
-            parents[month] = destination(item, access, create=False)
+            with operation_scope("B10", key):
+                parents[month] = (resolve_destination or destination)(item, access, create=False)
         parent = parents[month]
         require(parent == item["destination"], "DESTINATION_CHANGED")
         selected.append((item, task, parent))
     if selected:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = pool.map(lambda row: accept_item(manifest, *row, access), selected)
+            results = pool.map(lambda row: accept_item(manifest, *row, access, proof=proof), selected)
             for (item, _, _), result in zip(selected, results, strict=True):
                 tasks[item["task_id"]] = result
     if tasks != record["state"]["tasks"]:
-        record = advance(journal, record, tasks=tasks)
+        with operation_scope("B10"):
+            record = advance(journal, record, tasks=tasks)
     return record
 
 

@@ -6,12 +6,15 @@ import gzip
 import hashlib
 import json
 import os
+from http.client import IncompleteRead
+from time import sleep
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, build_opener
 from uuid import uuid4
 
 from .archive import archive_plan, compress_original
+from .drive_retry import ATTEMPTS, log_attempt, retry_read, transient
 from .live_preflight import NoRedirect, read_json
 
 BASE = "https://www.googleapis.com/drive/v3"
@@ -43,10 +46,46 @@ def find(parent, name, access):
     return entries[0] if entries else None
 
 
-def ensure(parent, name, mime, access, content=None, *, create, file_id=None, lookup=True):
+def read_drive_bytes(file_id, access, limit):
+    req = Request(f"{BASE}/files/{file_id}?alt=media", headers={
+        "Authorization": f"Bearer {access}", "Accept-Encoding": "identity",
+    })
+
+    def read():
+        with build_opener(NoRedirect()).open(req, timeout=25) as response:
+            return response.read(limit + 1)
+
+    result = retry_read(read, "DRIVE_MEDIA")
+    if len(result) > limit:
+        raise ValueError("private readback exceeds bound")
+    return result
+
+
+def _resolve_create(parent, name, file_id, access, failure):
+    # A POST with uncertain result is never repeated here. Read only the reserved object
+    # or, for older callers, a single private child at the exact requested path.
+    for attempt in range(ATTEMPTS):
+        try:
+            item = (read_json(f"{BASE}/files/{file_id}?fields={FIELDS}", access) if file_id is not None
+                    else find(parent, name, access))
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+            item = None
+        if item is not None:
+            return item
+        if attempt + 1 < ATTEMPTS:
+            sleep(2 ** attempt)
+    raise failure
+
+
+def ensure(parent, name, mime, access, content=None, *, create, file_id=None, lookup=True, read_winner=False):
     if not lookup and (not create or file_id is None):
         raise ValueError("a direct create needs a reserved Drive ID")
+    if read_winner and (lookup or file_id is None):
+        raise ValueError("content check can only be deferred for a reserved journal successor")
     existing = find(parent, name, access) if lookup else None
+    uncertain = False
     if existing is None:
         if not create:
             raise RuntimeError("expected Drive child missing")
@@ -73,17 +112,22 @@ def ensure(parent, name, mime, access, content=None, *, create, file_id=None, lo
         try:
             with build_opener(NoRedirect()).open(req, timeout=20) as response:
                 existing = json.load(response)
-        except HTTPError as error:
-            if error.code != 409 or file_id is None:
+        except (OSError, IncompleteRead) as error:
+            collision = isinstance(error, HTTPError) and error.code == 409 and file_id is not None
+            log_attempt("DRIVE_CREATE", error, 1)
+            if not collision and not transient(error):
                 raise
-            # A timed-out create may already have committed this reserved ID.
-            existing = read_json(f"{BASE}/files/{file_id}?fields={FIELDS}", access)
+            uncertain = True
+            existing = _resolve_create(parent, name, file_id, access, error)
     if (
         existing["name"] != name or existing["mimeType"] != mime
         or existing["parents"] != [parent] or existing["trashed"]
         or (file_id is not None and existing["id"] != file_id)
     ):
         raise RuntimeError("Drive child readback identity mismatch")
+    if uncertain and content is not None and not read_winner:
+        if read_drive_bytes(existing["id"], access, len(content)) != content:
+            raise RuntimeError("Drive child readback content mismatch")
     return existing["id"]
 
 

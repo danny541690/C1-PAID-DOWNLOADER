@@ -17,7 +17,7 @@ from urllib.request import Request, build_opener, urlopen
 from zoneinfo import ZoneInfo
 
 from .archive import compress_original
-from .drive_pilot import BASE, FOLDER, ROOT, ensure, find, token as drive_token
+from .drive_pilot import BASE, FOLDER, ROOT, ensure, find, read_drive_bytes, token as drive_token
 from .live_preflight import NoRedirect, read_json
 from .preflight import read_catalog
 from .reconcile_catalog import BACKER_COMPATIBLE, SOURCE
@@ -367,14 +367,7 @@ def recovery_location(access, *, prefix="R11_RELEASE_PREFLIGHT", run_id=None, at
 
 
 def read_private_file(file_id, access):
-    req = Request(f"{BASE}/files/{file_id}?alt=media", headers={
-        "Authorization": "Bearer " + access, "Accept-Encoding": "identity",
-    })
-    with build_opener(NoRedirect()).open(req, timeout=25) as response:
-        contents = response.read(MAX_BYTES + 65537)
-    if len(contents) > MAX_BYTES + 65536:
-        raise ValueError("private readback exceeds pilot size bound")
-    return contents
+    return read_drive_bytes(file_id, access, MAX_BYTES + 65536)
 
 
 def verify_private_archive():

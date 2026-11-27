@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from .drive_retry import retry_read
+
 
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -19,8 +21,18 @@ def read_json(url, token=None, data=None):
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = Request(url, data=data, headers=headers)
-    with build_opener(NoRedirect()).open(request, timeout=20) as response:
-        body = response.read(65537)
+    def read():
+        with build_opener(NoRedirect()).open(request, timeout=20) as response:
+            return response.read(65537)
+
+    drive = "https://www.googleapis.com/drive/v3/"
+    if data is None and url.startswith(drive):
+        endpoint = url.removeprefix(drive).split("?", 1)[0]
+        operation = {"files": "DRIVE_LIST", "about": "DRIVE_ABOUT",
+                     "files/generateIds": "DRIVE_RESERVE_ID"}.get(endpoint, "DRIVE_METADATA")
+        body = retry_read(read, operation)
+    else:
+        body = read()
     if len(body) > 65536:
         raise ValueError("oversized metadata response")
     return json.loads(body)

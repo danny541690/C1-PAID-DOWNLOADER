@@ -20,6 +20,20 @@ FOREIGN_EQUITIES = {
     f"{market}Stock{suffix}" for market in ("US", "UK", "Europe", "Japan") for suffix in ("Info", "Price")
 }
 R12_SPEC = "R12_1_BACKER_DOWNLOAD_ONLY_20261126.md"
+FINAL_GATES = tuple(f"G{number:02d}" for number in range(9))
+
+
+def final_readiness_verdict(gates):
+    """Evaluate evidenced technical readiness independently of release authorization."""
+    unresolved = [gate for gate in FINAL_GATES if gates.get(gate) != "PASS"]
+    return {
+        "result": "HOLD_WITH_EVIDENCE" if unresolved else "READY_FOR_USER_RELEASE",
+        "unresolved_gates": unresolved,
+        "passed_gates": len(FINAL_GATES) - len(unresolved),
+        "expected_gates": len(FINAL_GATES),
+        "full_download_release": "HOLD",
+        "production_dispatchable": 0,
+    }
 
 
 def positive_int(value):
@@ -51,8 +65,10 @@ def resolve_r12_scope(rows, specification):
     return [row | {"state": "EXCLUDED_BY_SCOPE"} if row["dataset"] in FOREIGN_EQUITIES else row for row in rows]
 
 
-def evaluate(plan, available_bytes, now, *, catalog_rows=None):
+def evaluate(plan, available_bytes, now, *, catalog_rows=None, gate_results=None):
     """Compute capacity only from explicitly approved production input."""
+    if gate_results is not None:
+        return final_readiness_verdict(gate_results)
     catalog = {entry["dataset"]: entry for entry in (sample_data() if catalog_rows is None else catalog_rows)}
     result = {
         "states": dict(Counter(entry["state"] for entry in catalog.values())),

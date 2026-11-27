@@ -15,6 +15,7 @@ from . import release_batch, release_rollout
 from .cross_run_ledger import DriveJournal
 from .dispatch import Window
 from .drive_pilot import FOLDER, ROOT, ensure, find, token
+from .drive_retry import operation_scope
 from .finish_preflight import MANIFEST as PROBE_MANIFEST, PREFIX as PROBE_PREFIX
 from .history_pilot import next_month, twse_month
 from .integration_pilot import digest, encode, verify_private_folder
@@ -24,7 +25,7 @@ from .live_recovery_canary import read_json_file, write_json
 from .manifest_pilot import serial_window
 from .market_lifetimes import nonoverlapping, stock_code
 from .production_preflight import reconciled_catalog
-from .quota import TOTAL_LIMIT
+from .quota import NORMAL_LIMIT, next_reservation_at
 from .release_batch import CUTOFF, MANIFEST_NAME, MAX_ATTEMPTS, WINDOW_LIMIT
 from .release_rehearsal import RehearsalError, require, root_folder
 from .release_remediation import pinned_contracts
@@ -147,7 +148,7 @@ def plan_budget(plan, access):
     return {"windows": count, "windows_by_dataset": dict(counts), "base_source_requests": count,
             "max_source_requests": count * MAX_ATTEMPTS, "storage_bound_bytes": storage_bytes(count),
             "segment_task_limit": BATCH_SIZE, "storage_bound_fits_at_launch": headroom >= storage_bytes(count),
-            "minimum_hours_at_hourly_limit": ceil(count / TOTAL_LIMIT)}
+            "minimum_hours_at_hourly_limit": ceil(count / NORMAL_LIMIT)}
 
 
 def freeze(access, parent, root, journal, run):
@@ -250,7 +251,7 @@ def year_budget(base, supplement):
         for name in ("windows", "base_source_requests", "max_source_requests", "storage_bound_bytes"):
             total[name] += extra[name]
         total["windows_by_dataset"] = dict(Counter(total["windows_by_dataset"]) + Counter(extra["windows_by_dataset"]))
-        total["minimum_hours_at_hourly_limit"] = ceil(total["base_source_requests"] / TOTAL_LIMIT)
+        total["minimum_hours_at_hourly_limit"] = ceil(total["base_source_requests"] / NORMAL_LIMIT)
         total["storage_bound_fits_at_launch"] = supplement["combined_storage_bound_fits"]
     return total
 
@@ -299,10 +300,8 @@ def segment(plan, master, root, access, group, *, create):
 
 
 def next_request_time(state, now):
-    due = max(now, state["pause"])
-    active = sorted(event["at"] for event in state["events"] if event["at"] > now - 3600)
-    if len(active) >= TOTAL_LIMIT:
-        due = max(due, active[len(active) - TOTAL_LIMIT] + 3600)
+    events = [(event["at"], event.get("kind", "download")) for event in state["events"]]
+    due = next_reservation_at(events, now, "download", paused_until=state["pause"])
     if account := state.get("account"):
         if now - account["at"] <= 150 and account["headroom"] <= len(state["events"]) - account["first_event"]:
             due = max(due, account["at"] + 151)
@@ -331,25 +330,27 @@ def accept_segment(folder, manifest, journal, record, master_journal, master, ac
     tag = f"{run}_{os.environ['GITHUB_RUN_ATTEMPT']}"
     events = state["events"][state["inherited_events"]:]
     own = [event for event in events if event["run"] == run]
-    for lane in sorted({row["lane"] for row in manifest["items"]}):
-        assigned = {row["task_id"]: tasks[row["task_id"]] for row in manifest["items"] if row["lane"] == lane}
-        write_json(folder, f"{lane}_{tag}.json", {"tasks": assigned, "events": [e for e in own if e["task_id"] in assigned]}, access)
-    write_json(folder, f"B09_{tag}.json", {key: task for key, task in tasks.items()
-                                          if task["status"] in {"BLOCKED", "REPAIR"}}, access)
-    receipts = {key: task["receipt"] for key, task in tasks.items() if task["status"] == "VERIFIED"}
-    write_json(folder, f"B10_{tag}.json", {"receipts": receipts, "states": dict(counts), "pending": pending}, access)
+    with operation_scope("B10_REPORT"):
+        for lane in sorted({row["lane"] for row in manifest["items"]}):
+            assigned = {row["task_id"]: tasks[row["task_id"]] for row in manifest["items"] if row["lane"] == lane}
+            write_json(folder, f"{lane}_{tag}.json", {"tasks": assigned, "events": [e for e in own if e["task_id"] in assigned]}, access)
+        write_json(folder, f"B09_{tag}.json", {key: task for key, task in tasks.items()
+                                              if task["status"] in {"BLOCKED", "REPAIR"}}, access)
+        receipts = {key: task["receipt"] for key, task in tasks.items() if task["status"] == "VERIFIED"}
+        write_json(folder, f"B10_{tag}.json", {"receipts": receipts, "states": dict(counts), "pending": pending}, access)
     if not pending:
         previous = master["state"]
         otc = group == "TPEX"
         progress = {"otc_cursor" if otc else "cursor": manifest["end"], "next_group": "BASE" if otc else "TPEX"}
-        master = advance(master_journal, master, **progress,
-                         totals=dict(Counter(previous["totals"]) + counts),
-                         rows=previous["rows"] + sum(r["proof"]["rows"] for r in receipts.values()),
-                         bytes=previous["bytes"] + sum(r["proof"]["bytes"] for r in receipts.values()),
-                         source_requests=previous["source_requests"] + sum(e["kind"] == "download" for e in events),
-                         account_requests=previous["account_requests"] + sum(e["kind"] == "probe" for e in events),
-                         events=[event for event in state["events"] if event["at"] > int(time()) - 3600],
-                         pause=state["pause"], auth_hold=state.get("auth_hold", False))
+        with operation_scope("B10_MASTER"):
+            master = advance(master_journal, master, **progress,
+                             totals=dict(Counter(previous["totals"]) + counts),
+                             rows=previous["rows"] + sum(r["proof"]["rows"] for r in receipts.values()),
+                             bytes=previous["bytes"] + sum(r["proof"]["bytes"] for r in receipts.values()),
+                             source_requests=previous["source_requests"] + sum(e["kind"] == "download" for e in events),
+                             account_requests=previous["account_requests"] + sum(e["kind"] == "probe" for e in events),
+                             events=[event for event in state["events"] if event["at"] > int(time()) - 3600],
+                             pause=state["pause"], auth_hold=state.get("auth_hold", False))
     return master, state, {"segment_states": dict(counts), "segment_pending": pending,
                            "source_requests_this_run": sum(e["kind"] == "download" for e in own),
                            "account_requests_this_run": sum(e["kind"] == "probe" for e in own),

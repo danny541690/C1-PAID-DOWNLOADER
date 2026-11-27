@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from scripts.r11_backer.archive import compress_original
 from scripts.r11_backer.integration_pilot import encode
+from scripts.r11_backer.quota import NORMAL_LIMIT, TOTAL_LIMIT
 from scripts.r11_backer.release_batch import RehearsalError, compile_daily, dispatch, proof_for, ready_wave, retry_state
 from scripts.r11_backer.release_probes import Contract
 from scripts.r11_backer.release_rollout import LANES, PER_RUN, budget_for
@@ -35,14 +36,19 @@ class ReleaseBatchTests(unittest.TestCase):
     def test_wave_uses_confirmed_cap_and_stops_at_shared_remaining_budget(self):
         items = [{"task_id": "a", "lane": "B01"}, {"task_id": "b", "lane": "B01"},
                  {"task_id": "c", "lane": "B04"}]
-        state = {"account": {"limit": 1600, "headroom": 2, "at": 100, "first_event": 1598}, "pause": 0,
-                 "events": [{"at": 100, "kind": "download"}] * 1598,
+        total_before_wave = TOTAL_LIMIT - 2
+        state = {"account": {"limit": TOTAL_LIMIT, "headroom": 2, "at": 100, "first_event": total_before_wave}, "pause": 0,
+                 "events": ([{"at": 100, "kind": "download"}] * (NORMAL_LIMIT - 3)
+                            + [{"at": 100, "kind": "probe"}] * (total_before_wave - NORMAL_LIMIT + 3)),
                  "tasks": dict.fromkeys(("a", "b", "c"), {"status": "READY"})}
         self.assertEqual(ready_wave(items, state, 100), [items[0], items[2]])
         state["pause"] = 110
         self.assertEqual(ready_wave(items, state, 109), [])
         state["events"].append({"at": 110, "kind": "download"})
         self.assertEqual(ready_wave(items, state, 110), [items[0]])
+        state["events"] = [{"at": 110, "kind": "download"}] * NORMAL_LIMIT
+        state["account"].update(first_event=NORMAL_LIMIT, headroom=TOTAL_LIMIT - NORMAL_LIMIT)
+        self.assertEqual(ready_wave(items, state, 110), [])
 
     def test_fourth_failed_attempt_leaves_only_that_window_in_repair(self):
         self.assertEqual(retry_state({"attempts": 3}, "TEMPORARY", 1)["status"], "READY")
