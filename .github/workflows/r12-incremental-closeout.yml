@@ -14,6 +14,7 @@ concurrency:
 env:
   R12_TASK_ID: R12-FINAL-READINESS-V2-01
   R12_SPEC_SHA: c83f8916d9559cba7638193bd5e206498f085ba8648337a685aeb2a5548b4271
+  R12_V21_RESUME_FROM: '46074004154_1_21b786db4269436699268c3336c8817d8abcf000'
 jobs:
   LOCK:
     if: ${{ contains(github.event.head_commit.message, '[r12-closeout-v21]') }}
@@ -56,6 +57,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Record G03 private evidence
         env:
           GH_TOKEN: ${{ github.token }}

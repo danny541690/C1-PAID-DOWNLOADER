@@ -148,9 +148,9 @@ def lock_inputs(ctx):
     return {"status": "PASS", "outputs": {"INPUT_LOCK.json": output}}
 
 
-def checked_gate(ctx, gate, *, folder=None, attempt=None):
+def checked_gate(ctx, gate, *, folder=None, checkpoint=None):
     read = ctx.read if folder is None else lambda name: read_json_file(folder, name, ctx.access)
-    binding = ctx.binding() if attempt is None else ctx.binding() | {"attempt": attempt}
+    binding = ctx.binding() | (checkpoint or {})
     report = read(f"{gate}.json")
     require(all(report.get(k) == v for k, v in binding.items()) and
             report["gate"] == report["job"] == gate and report["status"] in STATES, "GATE_BINDING")
@@ -176,10 +176,10 @@ def resume_completed(ctx, gate):
     try:
         attempt = ctx.attempt - 1
         folder = private_path(ctx.access, ctx.task_root, f"{ctx.run}_{attempt}")
-        checked_gate(ctx, "LOCK", folder=folder, attempt=attempt)
+        checked_gate(ctx, "LOCK", folder=folder, checkpoint={"attempt": attempt})
         old_input = read_json_file(folder, "INPUT_LOCK.json", ctx.access)
         require(old_input["production"] == ctx.read("INPUT_LOCK.json")["production"], "CHECKPOINT_PRODUCTION")
-        report = checked_gate(ctx, gate, folder=folder, attempt=attempt)
+        report = checked_gate(ctx, gate, folder=folder, checkpoint={"attempt": attempt})
         require(report["status"] == "PASS", "CHECKPOINT_GATE_HOLD")
         names = report.pop("output_sha256")
         prior = ctx.binding() | {"attempt": attempt, "gate": gate}
@@ -190,12 +190,52 @@ def resume_completed(ctx, gate):
         return None
 
 
+def resume_contract_closeout(ctx):
+    """Use the completed G03 output of this revision when its dependencies are unchanged."""
+    resume = os.environ.get("R12_V21_RESUME_FROM", "")
+    match = re.fullmatch(r"([0-9]+)_([1-4])_([a-f0-9]{40})", resume)
+    if match is None:
+        return None
+    run, attempt, commit = match.groups()
+    if int(run) >= ctx.run:
+        return None
+    relevant = "scripts/r11_backer/"
+    dependencies = ("v2_registry.py", "release_probes.py", "production_preflight.py", "production_download.py",
+                    "release_batch.py", "finish_preflight.py", "cross_run_ledger.py", "history_pilot.py",
+                    "archive.py", "contract_closeout.py", "reconcile_catalog.py", "drive_pilot.py", "quota.py")
+    # G03 has completed its reads with one or more evidenced scope holds. Reuse its full outputs.
+    try:
+        require(subprocess.run(["git", "diff", "--quiet", commit, ctx.commit, "--",
+                                *(relevant + name for name in dependencies)], check=False).returncode == 0,
+                "V21_CONTRACT_DEPENDENCIES_CHANGED")
+        checkpoint = {"run_id": int(run), "attempt": int(attempt), "commit": commit}
+        root = private_path(ctx.access, ctx.task_root, f"{run}_{attempt}")
+        old_lock = checked_gate(ctx, "LOCK", folder=root, checkpoint=checkpoint)
+        initial = ctx.read("INPUT_LOCK.json")
+        prior_input = read_json_file(root, "INPUT_LOCK.json", ctx.access)
+        require(old_lock["status"] == "PASS" and initial["production"] == prior_input["production"] and
+                initial["inputs"]["spec"] == prior_input["inputs"]["spec"], "V21_RESUME_LOCK_CHANGED")
+        jobs = GitHub().pages(f"/actions/runs/{run}/attempts/{attempt}/jobs", "jobs")
+        job = next(row for row in jobs if row["name"] == "G03")
+        require(job["conclusion"] == "success", "V21_PRIOR_CONTRACT_JOB_FAILED")
+        report = checked_gate(ctx, "G03", folder=root, checkpoint=checkpoint)
+        names = report.pop("output_sha256")
+        require(report["status"] in ("PASS", "HOLD") and set(OUTPUTS["G03"]) <= names.keys(),
+                "V21_CONTRACT_CHECKPOINT_NOT_COMPLETE")
+        return report | {"checkpoint": checkpoint | {"job_id": job["id"], "source_output_sha256": names},
+                         "outputs": {name: read_json_file(root, name, ctx.access) for name in names}}
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, StopIteration):
+        return None
+
+
 def execute(ctx, gate):
     if gate == "LOCK":
         return lock_inputs(ctx)
     if gate in {"G03", "G04", "G05_PROBE"}:
         require(checked_gate(ctx, "LOCK")["status"] == "PASS", "INPUT_LOCK_NOT_PASSED")
     if gate in {"G03", "G04"} and (resumed := resume_completed(ctx, gate)):
+        return resumed
+    if gate == "G03" and (resumed := resume_contract_closeout(ctx)):
         return resumed
     module, function = RUNNERS[gate]
     runner = getattr(import_module(f".{module}", __package__), function)

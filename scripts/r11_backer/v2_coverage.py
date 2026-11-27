@@ -455,7 +455,7 @@ def transfer_observations(packet, detail, evidence):
         quotes = {(venue, stamp): close_rows(packet[f"official/{venue}-{stamp}.json"], stamp, venue)
                   for venue in ("TWSE", "TPEx") for stamp in (before, day)}
         status, episodes = transfer_proof(code, day, quotes,
-                                          Sample("VALID_SAMPLE", tuple(reply["data"]), raw=raw))
+                                          Sample("VALID_SAMPLE", raw=raw, rows=tuple(reply["data"])))
         if status != "PASS_TRANSFER_PRICE_AND_VENUE_SAMPLE":
             gaps.append({"scope": code, "day": str(day), "reason": status})
             continue
