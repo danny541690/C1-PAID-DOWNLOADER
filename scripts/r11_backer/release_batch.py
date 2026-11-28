@@ -361,15 +361,23 @@ def governed_wave(items, state, transport, now, workers, lane_limit):
 
 
 def dispatch(manifest, record, journal, access, run, *, request_ceiling=None, workers=None, lane_limit=1,
-             permit=None, native_fetch=None, transport=None):
+             permit=None, native_fetch=None, transport=None, capacity=None):
     if manifest.get("schema_version") == 24:
         from .bulk_batch import dispatch as native_dispatch
 
         return native_dispatch(manifest, record, journal, access, run, permit=permit, fetch=native_fetch, transport=transport,
-                               request_ceiling=request_ceiling)
-    health = drive_health(access)
-    require(health["status"] == "POSITIVE_CAPACITY_AND_BRONZE_ACCESS" and
-            health["available_bytes"] >= manifest["capacity_bound"], "BATCH_CAPACITY_CHANGED")
+                               request_ceiling=request_ceiling, capacity=capacity)
+    if capacity is None:
+        health = drive_health(access)
+        require(health["status"] == "POSITIVE_CAPACITY_AND_BRONZE_ACCESS" and
+                health["available_bytes"] >= manifest["capacity_bound"], "BATCH_CAPACITY_CHANGED")
+    else:
+        from .v26_capacity import flight_bytes, keep_readback
+
+        status = capacity.check(flight_bytes(manifest, record, native=False), new_batch=True)
+        record = keep_readback(status, record, journal)
+        if not status["can_admit"]:
+            return record
     verify_private_folder(manifest["stage"], access)
     tasks = recover_pending(manifest, record["state"], access)
     if tasks != record["state"]["tasks"]:
@@ -398,6 +406,12 @@ def dispatch(manifest, record, journal, access, run, *, request_ceiling=None, wo
                 sleep(retry - now)
                 continue
             return record
+        if capacity:
+            in_flight = flight_bytes(manifest, record, native=False)
+            status = capacity.check(in_flight, 2 * (WINDOW_LIMIT + 1024) * len(wave), reserve=True)
+            record = keep_readback(status, record, journal)
+            if not status["can_admit"]:
+                return record
         tasks = deepcopy(current["tasks"])
         events = list(current["events"])
         for row, stage_id in zip(wave, journal.new_ids(len(wave)), strict=True):

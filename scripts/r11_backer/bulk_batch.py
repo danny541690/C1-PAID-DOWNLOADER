@@ -32,15 +32,20 @@ class NativeHold(RehearsalError):
 
 def prepare(index, read, journal, access, stage, destination, *, known_requests=(), known_coverage=()):
     windows = read_manifest(index, read, known_requests=known_requests, known_coverage=known_coverage)
+    return prepare_windows(index, windows, journal, access, stage, destination)
+
+
+def prepare_windows(index, windows, journal, access, stage, destination):
     count = sum(row["max_pages"] for row in windows)
     file_ids = iter(journal.new_ids(count)) if count else iter(())
     folders = {}
     items = []
     verify_private_folder(stage, access)
     for row in windows:
-        if row["anchor_month"] not in folders:
+        exploratory = row["completeness"].get("planned_class") == "EXPLORATION"
+        if not exploratory and row["anchor_month"] not in folders:
             folders[row["anchor_month"]] = destination(row, access, create=True)
-        items.append(row | {"destination": folders[row["anchor_month"]],
+        items.append(row | {"destination": stage if exploratory else folders[row["anchor_month"]],
                             "destination_ids": [next(file_ids) for _ in range(row["max_pages"])]})
     return {"schema_version": SCHEMA, "stage": stage, "items": items, "index_sha256": digest(encode(index)),
             "capacity": planned_capacity(windows), "held_calendar_months": []}
@@ -252,10 +257,17 @@ def provider_result(journal, record, key, task, code, retry_after, now, *, scope
                   auth_hold=record["state"]["auth_hold"] or (code == 401 if scoped else code in AUTH_BLOCK_CODES))
 
 
-def dispatch(manifest, record, journal, access, run, *, permit, fetch, request_ceiling=None, transport=None):
+def dispatch(manifest, record, journal, access, run, *, permit, fetch, request_ceiling=None, transport=None, capacity=None):
     require(transport is not None or callable(permit) and callable(getattr(permit, "complete", None)) and callable(fetch),
             "NATIVE_DISPATCH_REQUIRES_SHARED_BROKER_AND_TRANSPORT")
     record = recover(manifest, record, journal, access)
+    if capacity:
+        from .v26_capacity import flight_bytes, keep_readback
+
+        status = capacity.check(flight_bytes(manifest, record, native=True), new_batch=True)
+        record = keep_readback(status, record, journal)
+        if not status["can_admit"]:
+            return record
     sent = sum(event["kind"] == "download" and event["run"] == run for event in record["state"]["events"])
     for item in manifest["items"]:
         for _ in range(item["max_pages"]):
@@ -266,6 +278,12 @@ def dispatch(manifest, record, journal, access, run, *, permit, fetch, request_c
             task = state["tasks"][item["task_id"]]
             if task["status"] != "READY" or task.get("retry_after", 0) > now:
                 break
+            if capacity:
+                status = capacity.check(flight_bytes(manifest, record, native=True),
+                                        2 * packed_limit(item) * item["max_pages"], reserve=True)
+                record = keep_readback(status, record, journal)
+                if not status["can_admit"]:
+                    return record
             before = len(state["events"])
             record = receive_one(manifest, record, journal, item, access, run, permit, fetch, now, transport=transport)
             after = len(record["state"]["events"])
@@ -275,7 +293,7 @@ def dispatch(manifest, record, journal, access, run, *, permit, fetch, request_c
     return record
 
 
-def accepted_proof(manifest, item, task, access):
+def accepted_proof(manifest, item, task, access, comparison=None):
     raw_pages, packed_pages = [], []
     for page in task["pages"]:
         pending = {"id": page["staging_id"], "position": page["position"], "attempt": page["attempt"]}
@@ -284,11 +302,17 @@ def accepted_proof(manifest, item, task, access):
         raw_pages.append((page["params"], raw))
         packed_pages.append(packed)
     rule = check_window(item)
+    checked = item
+    if item["completeness"]["method"] == "deferred_source_reconciliation":
+        from .v26_acceptance import coverage_inventory, read_comparison, stable_witness_ref
+
+        require(comparison is not None, "V26_INDEPENDENT_COMPLETENESS_PENDING")
+        checked = item | {"completeness": read_comparison(item, comparison)}
     if not rule.page_field:
         require(len(raw_pages) == 1, "UNEXPECTED_NATIVE_PAGE_COUNT")
-        proof = native_proof(item, packed_pages[0], raw_pages[0][1])
+        proof = native_proof(checked, packed_pages[0], raw_pages[0][1])
     else:
-        validated = validate_pages(rule, raw_pages, completeness=item["completeness"])
+        validated = validate_pages(rule, raw_pages, completeness=checked["completeness"])
         require(all(digest(raw) == proof["raw_sha"] and digest(packed) == proof["packed_sha"]
                     for (_, raw), packed, proof in zip(raw_pages, packed_pages, validated["pages"], strict=True)),
                 "NATIVE_PAGE_GZIP_SHA")
@@ -300,28 +324,50 @@ def accepted_proof(manifest, item, task, access):
                  "last_sha": nonempty[-1]["last_sha"] if nonempty else None,
                  "pages": validated["pages"], "request_id": item["request_id"],
                  "contract_version": item["contract_version"], "coverage_sha256": digest(encode(item["coverage"]))}
+    if checked is not item:
+        native_rows = [row for params, raw in raw_pages for row in read_rows(rule, params, raw)[0]]
+        native_keys = coverage_inventory(item, native_rows)
+        proof |= {"independent_source_evidence_sha256": stable_witness_ref(comparison), "native_keys": len(native_keys),
+                  "native_keys_sha256": digest(encode(native_keys))}
     return proof, packed_pages
 
 
-def accept(manifest, record, journal, access, *, destination, audit=False, reread_verified=True):
+def accept(manifest, record, journal, access, *, destination, audit=False, reread_verified=True, comparison_reader=None,
+           capacity=None):
     check_batch(manifest, record)
     tasks = deepcopy(record["state"]["tasks"])
     parents = {}
     for item in manifest["items"]:
         key = item["task_id"]
         task = tasks[key]
-        if task["status"] not in ({"VERIFIED"} if audit else {"STAGED", "VERIFIED"}) or (
-            task["status"] == "VERIFIED" and not reread_verified
-        ):
+        status = task["status"]
+        repair = status == "REPAIR" and task.get("reason") == "V26_INDEPENDENT_COMPLETENESS_PENDING"
+        if status not in ({"VERIFIED"} if audit else {"STAGED", "VERIFIED"}) and not (repair and not audit and comparison_reader):
+            continue
+        if status == "VERIFIED" and not reread_verified:
+            continue
+        if item["completeness"].get("planned_class") == "EXPLORATION":
+            tasks[key] = task | {"status": "EXPLORATION_CAPTURED", "reason": "V26_EXPLORATION_STAGE_ONLY"}
             continue
         with operation_scope("B10", key):
             try:
+                comparison = None
+                if item["completeness"]["method"] == "deferred_source_reconciliation":
+                    comparison = comparison_reader(item) if comparison_reader else None
+                    if not comparison and status != "VERIFIED":
+                        tasks[key] = task | {"status": "REPAIR", "reason": "V26_INDEPENDENT_COMPLETENESS_PENDING"}
+                        continue
+                    require(comparison, "V26_INDEPENDENT_COMPARISON_MISSING_ON_AUDIT")
+                if capacity and status != "VERIFIED":
+                    amount = sum(page["bytes"] for page in task["pages"])
+                    if not capacity.check(0, amount, reserve=True)["can_admit"]:
+                        continue
                 if item["anchor_month"] not in parents:
                     parents[item["anchor_month"]] = destination(item, access, create=False)
                 parent = parents[item["anchor_month"]]
                 require(item["destination"] == parent, "NATIVE_BRONZE_FOLDER_ID")
                 verify_private_folder(parent, access)
-                proof, packed_pages = accepted_proof(manifest, item, task, access)
+                proof, packed_pages = accepted_proof(manifest, item, task, access, comparison)
                 is_verified = task["status"] == "VERIFIED"
                 files = []
                 for page, packed in zip(task["pages"], packed_pages, strict=True):
@@ -346,7 +392,7 @@ def accept(manifest, record, journal, access, *, destination, audit=False, rerea
                 attempt = task.get("accept_attempts", 0) + 1
                 phase = "STAGED" if transient(exc) and attempt < ATTEMPTS else "REPAIR"
                 tasks[key] = task | {"status": phase, "accept_attempts": attempt, "reason": error_class(exc)}
-            except (ValueError, RuntimeError):
+            except (ValueError, RuntimeError, KeyError, TypeError):
                 if task["status"] == "VERIFIED":
                     raise
                 tasks[key] = task | {"status": "BLOCKED", "reason": "NATIVE_B10_INCOMPLETE_OR_INVALID"}

@@ -130,12 +130,48 @@ def candidate_windows(plan):
 
 
 def prepare_native_segment(index, read, journal, access, stage, *, resolve_destination=None,
-                           known_requests=(), known_coverage=()):
+                           known_requests=(), known_coverage=(), cursor=None, limit=96, capture_at=None):
     """Load a hashed native manifest into the existing B01–B10 journal interface."""
-    from .bulk_batch import prepare
+    from .bulk_batch import prepare, prepare_windows
 
+    if index["schema_version"] == 26:
+        from .executable_manifest_v26 import origin, render
+
+        cursor = cursor or origin(index)
+        rows, following, exhausted, holds = render(index, read, cursor, limit=limit, known_requests=known_requests,
+                                                  known_coverage=known_coverage, capture_at=capture_at)
+        return prepare_windows(index, rows, journal, access, stage, resolve_destination or release_batch.destination) | {
+            "v26_cursor": cursor, "v26_next_cursor": following, "v26_exhausted": exhausted, "v26_overlap_holds": holds}
     return prepare(index, read, journal, access, stage, resolve_destination or release_batch.destination,
                    known_requests=known_requests, known_coverage=known_coverage)
+
+
+def resume_native_segment(index, read, progress, stage, destination, *, queue="normal", limit=96,
+                          known_requests=(), known_coverage=(), capture_at=None):
+    """Reuse the journaled segment and its allocated staging and receipt identities."""
+    from .executable_manifest_v26 import open_checkpoint, save_active
+    from .final_readiness_v2 import original
+
+    access = progress.access
+    record = open_checkpoint(index, progress, queue)
+    active = record["state"]["active"]
+    name = f"V26_BATCH_{digest(encode(record['state']['cursor']))}.json"
+    if active:
+        key, raw = original(access, progress.parent, name)
+        require(key == active["file_id"] and digest(raw) == active["sha256"], "V26_RESUME_BATCH_SHA")
+        return record, json.loads(raw)
+    stored = find(progress.parent, name, access)
+    if stored:
+        key, raw = original(access, progress.parent, name)
+        batch = json.loads(raw)
+        require(batch["index_sha256"] == digest(encode(index)) and batch["v26_cursor"] == record["state"]["cursor"] and
+                batch["stage"] == stage, "V26_INTERRUPTED_BATCH_CREATION")
+    else:
+        batch = prepare_native_segment(index, read, progress, access, stage, resolve_destination=destination,
+                                       cursor=record["state"]["cursor"], limit=limit, known_requests=known_requests,
+                                       known_coverage=known_coverage, capture_at=capture_at)
+        key = write_json(progress.parent, name, json.loads(encode(batch)), access)
+    return save_active(progress, record, key, batch), batch
 
 
 def storage_bytes(windows):
@@ -368,7 +404,8 @@ def accept_segment(folder, manifest, journal, record, master_journal, master, ac
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("launch", "continue", "accept", "validate-native", "validate-autonomous-quota"))
+    parser.add_argument("phase", choices=("launch", "continue", "accept", "validate-native", "validate-autonomous-quota",
+                                          "validate-executable-manifest"))
     phase = parser.parse_args().phase
     if phase == "validate-native":
         from .official_bulk_v24 import run_job
@@ -377,6 +414,11 @@ def main():
         return
     if phase == "validate-autonomous-quota":
         from .autonomous_closeout_v25 import run_job
+
+        run_job("G06")
+        return
+    if phase == "validate-executable-manifest":
+        from .executable_closeout_v26 import run_job
 
         run_job("G06")
         return
@@ -404,10 +446,12 @@ def main():
                 state = record["state"]
                 if not state.get("auth_hold") and any(t["status"] in {"READY", "REQUESTING"} for t in state["tasks"].values()):
                     from .v25_account import production_transport
+                    from .v26_capacity import CapacityGuard, observed_drive
 
                     with production_transport(access, run, int(os.environ["GITHUB_RUN_ATTEMPT"])) as transport:
                         record = release_batch.dispatch(manifest, record, batch, access, run, request_ceiling=BATCH_SIZE,
-                                                        workers=WORKERS, lane_limit=WORKERS, transport=transport)
+                                                        workers=WORKERS, lane_limit=WORKERS, transport=transport,
+                                                        capacity=CapacityGuard(lambda: observed_drive(access)))
                 state = record["state"]
                 result = release_batch.report(manifest, record, run)
         totals = master["state"]

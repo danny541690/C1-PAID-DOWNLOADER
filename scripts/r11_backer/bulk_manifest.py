@@ -89,7 +89,9 @@ def compile_window(*, rule, mode, params, lane, venue, version, completeness, co
     from .v2_registry import check_parameters
 
     active = adapt_rule(rule, mode, raw_limit)
-    require(active.grain in ALLOWED_GRAINS and re.fullmatch(r"B0[1-8]", lane) and type(max_pages) is int and
+    deferred = completeness.get("method") == "deferred_source_reconciliation"
+    boundary_probe = deferred and completeness.get("planned_class") == "EXPLORATION"
+    require(active.grain in ALLOWED_GRAINS and (re.fullmatch(r"B0[1-8]", lane) or boundary_probe and lane == "B09") and type(max_pages) is int and
             1 <= max_pages <= MAX_PAGES and raw_limit * max_pages <= MAX_GROUP_RAW and
             (max_pages == 1 or bool(active.page_field)), "UNSUPPORTED_NATIVE_WINDOW")
     first, last = check_parameters(active, params)
@@ -105,7 +107,9 @@ def compile_window(*, rule, mode, params, lane, venue, version, completeness, co
         # A market acceptance set includes all expected provider keys. A research-only subset cannot certify it.
         require(completeness.get("native_universe") == "FULL_RESPONSE_SCOPE", "MARKET_COMPLETENESS_SCOPE")
     method = completeness.get("method")
-    require(method in {"expected_keys", "expected_multiset", "split_reconciliation", "confirmed_empty"} and
+    require((method in {"expected_keys", "expected_multiset", "split_reconciliation", "confirmed_empty"} or
+             deferred and version == "FinMind_v4_native_history_v26" and
+             completeness.get("verifier") in {"PROVIDER_SPLIT", "OFFICIAL_EXPECTED_KEYS", "OFFICIAL_ROW_MULTISET"}) and
             evidence, "INDEPENDENT_WINDOW_EVIDENCE_REQUIRED")
     require(method != "confirmed_empty" or (active.grain in {"event", "event_interval"} and
                                             completeness.get("evidence") and not coverage), "INVALID_EMPTY_POLICY")

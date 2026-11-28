@@ -1,0 +1,176 @@
+name: R12.1 V2.6 Executable Manifest and Practical Resource Closeout
+on:
+  push:
+    branches: [codex/r12-final-readiness-v2]
+    paths:
+      - .github/workflows/r12-v26-executable-closeout.yml
+      - scripts/r11_backer/executable_closeout_v26.py
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: r12-1-bounded-preflight
+  cancel-in-progress: false
+env:
+  R12_TASK_ID: R12-FINAL-READINESS-V2-01
+  R12_SPEC_SHA: 861ddcd825818f2bdd36d22d5a45a7428b6ad787fbdc1ba7179bf85a4071a327
+jobs:
+  LOCK:
+    if: ${{ github.repository == 'danny541690/C1-PAID-DOWNLOADER' && contains(github.event.head_commit.message, '[r12-v26-preflight]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record LOCK in private Drive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.executable_closeout_v26 LOCK
+  H:
+    needs: [LOCK]
+    if: ${{ always() && !cancelled() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && contains(github.event.head_commit.message, '[r12-v26-preflight]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record H in private Drive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.executable_closeout_v26 H
+  D1:
+    needs: [LOCK]
+    if: ${{ always() && !cancelled() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && contains(github.event.head_commit.message, '[r12-v26-preflight]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record D1 in private Drive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.executable_closeout_v26 D1
+  D2:
+    needs: [LOCK]
+    if: ${{ always() && !cancelled() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && contains(github.event.head_commit.message, '[r12-v26-preflight]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record D2 in private Drive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.executable_closeout_v26 D2
+  D3:
+    needs: [LOCK]
+    if: ${{ always() && !cancelled() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && contains(github.event.head_commit.message, '[r12-v26-preflight]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record D3 in private Drive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.executable_closeout_v26 D3
+  G04_FINAL:
+    needs: [D1, D2]
+    if: ${{ always() && !cancelled() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && contains(github.event.head_commit.message, '[r12-v26-preflight]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record G04_FINAL in private Drive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.executable_closeout_v26 G04_FINAL
+  G05_FINAL:
+    needs: [G04_FINAL, D3]
+    if: ${{ always() && !cancelled() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && contains(github.event.head_commit.message, '[r12-v26-preflight]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record G05_FINAL in private Drive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.executable_closeout_v26 G05_FINAL
+  G06:
+    needs: [G04_FINAL, G05_FINAL]
+    if: ${{ always() && !cancelled() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && contains(github.event.head_commit.message, '[r12-v26-preflight]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record G06 in private Drive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.production_download validate-executable-manifest
+  G07:
+    needs: [G06]
+    if: ${{ always() && !cancelled() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && contains(github.event.head_commit.message, '[r12-v26-preflight]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record G07 in private Drive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.executable_closeout_v26 G07
+  G08:
+    needs: [LOCK, H, D1, D2, D3, G04_FINAL, G05_FINAL, G06, G07]
+    if: ${{ always() && !cancelled() && github.repository == 'danny541690/C1-PAID-DOWNLOADER' && contains(github.event.head_commit.message, '[r12-v26-preflight]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record G08 in private Drive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.executable_closeout_v26 G08
