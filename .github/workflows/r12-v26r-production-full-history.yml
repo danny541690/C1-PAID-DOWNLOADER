@@ -1,0 +1,226 @@
+name: R12.1 V2.6-R Full History Production and Integration
+on:
+  push:
+    branches: [codex/r12-final-readiness-v2]
+    paths:
+      - .github/workflows/r12-v26r-production-full-history.yml
+      - scripts/r11_backer/full_history_rehearsal.py
+      - scripts/r11_backer/production_full_history.py
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Full-history operation
+        type: choice
+        options: [launch, continue, resume, integration-resume]
+        default: launch
+      release_file:
+        description: Activated private production release file ID
+        type: string
+        default: ''
+      integration_origin:
+        description: Origin Run ID of the isolated integration
+        type: string
+        default: ''
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: r12-1-bounded-preflight
+  cancel-in-progress: false
+env:
+  R12R_BRANCH: codex/r12-final-readiness-v2
+  R12R_WORKFLOW_INVOKE: r12-v26r-production-full-history.yml
+jobs:
+  H:
+    if: >-
+      github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
+      github.event_name == 'push' && contains(github.event.head_commit.message, '[r12-v26r-integration]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Bind the common handover to the sealed V2.6 documents
+        env:
+          R12R_EXERCISE: 'true'
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.full_history_rehearsal handover
+
+  integration-first:
+    if: >-
+      github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
+      github.event_name == 'push' && contains(github.event.head_commit.message, '[r12-v26r-integration]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 23
+    outputs:
+      ready_for_resume: ${{ steps.rehearse.outputs.ready_for_resume }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Exercise release denial, capacity pause, launch, B10, and an interrupted upload
+        id: rehearse
+        env:
+          R12R_EXERCISE: 'true'
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          python3 -m unittest discover -s tests -p 'test_r12_v26r_release.py' -q
+          python3 -m scripts.r11_backer.full_history_rehearsal lock
+          if output=$(python3 -m scripts.r11_backer.production_download admission --release-file 'isolated-not-an-approval'); then
+            exit 1
+          fi
+          [[ "$output" == *V26R_RELEASE_APPROVAL_REQUIRED* ]]
+          cli=(python3 -m scripts.r11_backer.production_download)
+          testargs=(--profile integration)
+          R12R_TEST_CAPACITY=LOW "${cli[@]}" launch "${testargs[@]}" | tee /tmp/r12r-capacity-quote.json
+          python3 -c 'import json; assert json.load(open("/tmp/r12r-capacity-quote.json"))["state"] == "WAIT_CAPACITY"'
+          "${cli[@]}" continue "${testargs[@]}"
+          "${cli[@]}" accept "${testargs[@]}"
+          "${cli[@]}" next "${testargs[@]}"
+          "${cli[@]}" continue "${testargs[@]}" --interrupt-after-stage
+          python3 -m scripts.r11_backer.full_history_rehearsal first_checkpoint
+
+  integration-next:
+    needs: [H, integration-first]
+    if: needs.integration-first.outputs.ready_for_resume == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Start the one isolated continuation Run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh workflow run "$R12R_WORKFLOW_INVOKE" --repo "$GITHUB_REPOSITORY"
+          --ref "$R12R_BRANCH" -f mode=integration-resume -f integration_origin="$GITHUB_RUN_ID"
+
+  integration-resume:
+    if: >-
+      github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'integration-resume' &&
+      inputs.release_file == '' && inputs.integration_origin != '' &&
+      github.ref_name == 'codex/r12-final-readiness-v2'
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Recover the same staged body, reconcile B09, accept B10, and continue exploration
+        env:
+          R12R_EXERCISE: 'true'
+          R12R_ORIGIN: ${{ inputs.integration_origin }}
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          cli=(python3 -m scripts.r11_backer.production_download)
+          testargs=(--profile integration --integration-origin "$R12R_ORIGIN")
+          "${cli[@]}" resume "${testargs[@]}"
+          "${cli[@]}" accept "${testargs[@]}"
+          "${cli[@]}" next "${testargs[@]}"
+          "${cli[@]}" continue "${testargs[@]}"
+          "${cli[@]}" accept "${testargs[@]}"
+          "${cli[@]}" next "${testargs[@]}"
+          python3 -m scripts.r11_backer.full_history_rehearsal resumed_proof --origin "$R12R_ORIGIN"
+      - name: Verify the production anchors and publish the private integration report
+        if: always() && !cancelled()
+        env:
+          R12R_EXERCISE: 'true'
+          R12R_ORIGIN: ${{ inputs.integration_origin }}
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python3 -m scripts.r11_backer.full_history_rehearsal report --origin "$R12R_ORIGIN"
+
+  production:
+    if: >-
+      github.repository == 'danny541690/C1-PAID-DOWNLOADER' &&
+      vars.R12R_ACTIVE_RELEASE_FILE_ID != '' &&
+      (github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_dispatch' && inputs.mode != 'integration-resume' &&
+         inputs.integration_origin == '' && inputs.release_file == vars.R12R_ACTIVE_RELEASE_FILE_ID))
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      continue_now: ${{ steps.next.outputs.continue_now }}
+    env:
+      R12R_ACTIVE_RELEASE_FILE_ID: ${{ vars.R12R_ACTIVE_RELEASE_FILE_ID }}
+      R12R_RELEASE_FILE: ${{ github.event_name == 'schedule' && vars.R12R_ACTIVE_RELEASE_FILE_ID || inputs.release_file }}
+      R12R_PHASE: ${{ github.event_name == 'schedule' && 'resume' || inputs.mode }}
+      GH_TOKEN: ${{ github.token }}
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/r12-final-readiness-v2
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify the separate user release and reopen the durable scheduler
+        id: admission
+        run: |
+          python3 -m scripts.r11_backer.production_download admission --release-file "$R12R_RELEASE_FILE"
+          if [[ "$R12R_PHASE" == 'launch' ]]; then
+            echo 'dispatchable=true' >> "$GITHUB_OUTPUT"
+          else
+            result=$(python3 -m scripts.r11_backer.production_download next --release-file "$R12R_RELEASE_FILE")
+            if [[ "$result" == *'"continue_now": true'* ]]; then
+              echo 'dispatchable=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Dispatch the next native batch and B09 comparisons through B00
+        id: dispatch
+        if: steps.admission.outputs.dispatchable == 'true'
+        timeout-minutes: 13
+        env:
+          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
+        run: >-
+          python3 -m scripts.r11_backer.production_download "$R12R_PHASE"
+          --release-file "$R12R_RELEASE_FILE"
+      - name: B10 reads back the original, writes the Receipt and advances the Master
+        if: steps.dispatch.outcome == 'success'
+        run: >-
+          python3 -m scripts.r11_backer.production_download accept
+          --release-file "$R12R_RELEASE_FILE"
+      - name: Decide whether a new batch is runnable
+        id: next
+        if: steps.dispatch.outcome == 'success'
+        run: >-
+          python3 -m scripts.r11_backer.production_download next
+          --release-file "$R12R_RELEASE_FILE"
+
+  production-next:
+    needs: [production]
+    if: needs.production.outputs.continue_now == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Queue the next full-history batch from the persisted Master
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R12R_RELEASE_FILE: ${{ vars.R12R_ACTIVE_RELEASE_FILE_ID }}
+        run: >-
+          gh workflow run "$R12R_WORKFLOW_INVOKE" --repo "$GITHUB_REPOSITORY"
+          --ref "$R12R_BRANCH" -f mode=continue -f release_file="$R12R_RELEASE_FILE"
