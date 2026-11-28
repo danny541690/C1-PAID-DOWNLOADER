@@ -368,10 +368,15 @@ def accept_segment(folder, manifest, journal, record, master_journal, master, ac
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("launch", "continue", "accept", "validate-native"))
+    parser.add_argument("phase", choices=("launch", "continue", "accept", "validate-native", "validate-autonomous-quota"))
     phase = parser.parse_args().phase
     if phase == "validate-native":
         from .official_bulk_v24 import run_job
+
+        run_job("G06")
+        return
+    if phase == "validate-autonomous-quota":
+        from .autonomous_closeout_v25 import run_job
 
         run_job("G06")
         return
@@ -398,11 +403,11 @@ def main():
             else:
                 state = record["state"]
                 if not state.get("auth_hold") and any(t["status"] in {"READY", "REQUESTING"} for t in state["tasks"].values()):
-                    if wait_for_request(state):
-                        access = token()
-                        batch = DriveJournal(folder, access)
-                    record = release_batch.dispatch(manifest, record, batch, access, run,
-                                                    request_ceiling=BATCH_SIZE, workers=WORKERS, lane_limit=WORKERS)
+                    from .v25_account import production_transport
+
+                    with production_transport(access, run, int(os.environ["GITHUB_RUN_ATTEMPT"])) as transport:
+                        record = release_batch.dispatch(manifest, record, batch, access, run, request_ceiling=BATCH_SIZE,
+                                                        workers=WORKERS, lane_limit=WORKERS, transport=transport)
                 state = record["state"]
                 result = release_batch.report(manifest, record, run)
         totals = master["state"]

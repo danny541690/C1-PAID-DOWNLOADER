@@ -158,7 +158,7 @@ def recover(manifest, record, journal, access, *, now=None):
     return record
 
 
-def receive_one(manifest, record, journal, item, access, run, permit, fetch, now):
+def receive_one(manifest, record, journal, item, access, run, permit, fetch, now, transport=None):
     state = record["state"]
     key = item["task_id"]
     task = state["tasks"][key]
@@ -169,7 +169,35 @@ def receive_one(manifest, record, journal, item, access, run, permit, fetch, now
                "grant_id": grant_id, "lease_until": now + 90}
     task = task | {"status": "REQUESTING", "attempts": attempt, "pending": pending}
     record = update(journal, record, key, task)
-    granted = permit(grant_id, params, item)
+    def complete(identifier, status, **kwargs):
+        if transport is None:
+            permit.complete(identifier, status, **kwargs)
+
+    response = None
+    if transport is not None:
+        from .autonomous_quota import Deferred
+
+        try:
+            outcome, response = transport.fetch(params, item["raw_limit"], identifier=grant_id, lane=item["lane"])
+        except Deferred as error:
+            grant_status = str(error)
+            if grant_status == "B00_ATTEMPT_ALREADY_CHARGED":
+                return update(journal, record, key, task | {"status": "REPAIR", "reason": "UNKNOWN_CHARGED_ATTEMPT"})
+            skipped = {k: v for k, v in task.items() if k != "pending"}
+            return update(journal, record, key, skipped | {"status": "READY", "attempts": attempt - 1,
+                                                           "retry_after": max(now + 1, (error.due or 0) // 1000),
+                                                           "reason": grant_status})
+        if not response:
+            events = record["state"]["events"] + [{"kind": "download", "at": now, "run": run,
+                                                    "task_id": key, "request_id": grant_id}]
+            record = update(journal, record, key, task, events=events)
+            if code := outcome.get("provider_code"):
+                return provider_result(journal, record, key, task, code, None, now, scoped=True)
+            changed = retry_task(task, outcome["status"], now) if outcome["retryable"] else task | {
+                "status": "BLOCKED", "reason": outcome["status"],
+            }
+            return update(journal, record, key, changed)
+    granted = "RESERVED" if transport is not None else permit(grant_id, params, item)
     if granted != "RESERVED":
         if granted in {"ALREADY_RESERVED", "RESERVATION_UNCERTAIN"}:
             return update(journal, record, key, task | {"reason": "QUOTA_RESERVATION_UNCERTAIN"})
@@ -179,27 +207,27 @@ def receive_one(manifest, record, journal, item, access, run, permit, fetch, now
                                             "task_id": key, "request_id": grant_id}]
     record = update(journal, record, key, task, events=events)
     try:
-        raw, encoding = fetch(params, item["raw_limit"])
+        raw, encoding = response if response is not None else fetch(params, item["raw_limit"])
         reply = json.loads(raw)
         code = provider_block_code(reply.get("status")) if isinstance(reply, dict) else None
         if code:
-            permit.complete(grant_id, f"HTTP_{code}", code=code, retry_after=reply.get("retry_after"))
+            complete(grant_id, f"HTTP_{code}", code=code, retry_after=reply.get("retry_after"))
             return provider_result(journal, record, key, task, code, reply.get("retry_after"), now)
         packed, _, _ = compress_original(raw)
         page = stored_page(item, pending, raw, packed, encoding)
     except HTTPError as exc:
         delay = exc.headers.get("Retry-After") if exc.headers else None
-        permit.complete(grant_id, f"HTTP_{exc.code}", code=exc.code, retry_after=delay)
+        complete(grant_id, f"HTTP_{exc.code}", code=exc.code, retry_after=delay)
         return provider_result(journal, record, key, task, exc.code, delay, now)
     except (OSError, IncompleteRead) as exc:
-        permit.complete(grant_id, error_class(exc))
+        complete(grant_id, error_class(exc))
         outcome = retry_task(task, error_class(exc), now) if transient(exc) else task | {
             "status": "BLOCKED", "reason": error_class(exc),
         }
         return update(journal, record, key, outcome)
     except ValueError as exc:
         reason = str(exc) if isinstance(exc, RehearsalError) else "INVALID_NATIVE_PAYLOAD"
-        permit.complete(grant_id, reason)
+        complete(grant_id, reason)
         return update(journal, record, key, task | {"status": "BLOCKED", "reason": reason})
     # Write encoding before the upload. A resumed process can reconstruct the receipt from the reserved ID.
     pending = pending | {"encoding": encoding}
@@ -208,24 +236,24 @@ def receive_one(manifest, record, journal, item, access, run, permit, fetch, now
     try:
         stage_blob(manifest, item, pending, packed, access)
     except (OSError, RuntimeError, ValueError, IncompleteRead):
-        permit.complete(grant_id, "STAGING_RESULT_UNCERTAIN")
+        complete(grant_id, "STAGING_RESULT_UNCERTAIN")
         return update(journal, record, key, task | {"reason": "STAGING_RESULT_UNCERTAIN"})
-    permit.complete(grant_id, "NATIVE_RESPONSE_STAGED")
+    complete(grant_id, "NATIVE_RESPONSE_STAGED")
     return update(journal, record, key, staged_task(item, task, page))
 
 
-def provider_result(journal, record, key, task, code, retry_after, now):
+def provider_result(journal, record, key, task, code, retry_after, now, *, scoped=False):
     if code in QUOTA_BLOCK_CODES:
         until = max(record["state"]["pause"], retry_deadline(retry_after, now))
         return update(journal, record, key, retry_task(task, f"HTTP_{code}", now), pause=until)
     if code == 408 or 500 <= code < 600:
         return update(journal, record, key, retry_task(task, f"HTTP_{code}", now))
     return update(journal, record, key, task | {"status": "BLOCKED", "reason": f"HTTP_{code}"},
-                  auth_hold=record["state"]["auth_hold"] or code in AUTH_BLOCK_CODES)
+                  auth_hold=record["state"]["auth_hold"] or (code == 401 if scoped else code in AUTH_BLOCK_CODES))
 
 
-def dispatch(manifest, record, journal, access, run, *, permit, fetch, request_ceiling=None):
-    require(callable(permit) and callable(getattr(permit, "complete", None)) and callable(fetch),
+def dispatch(manifest, record, journal, access, run, *, permit, fetch, request_ceiling=None, transport=None):
+    require(transport is not None or callable(permit) and callable(getattr(permit, "complete", None)) and callable(fetch),
             "NATIVE_DISPATCH_REQUIRES_SHARED_BROKER_AND_TRANSPORT")
     record = recover(manifest, record, journal, access)
     sent = sum(event["kind"] == "download" and event["run"] == run for event in record["state"]["events"])
@@ -239,7 +267,7 @@ def dispatch(manifest, record, journal, access, run, *, permit, fetch, request_c
             if task["status"] != "READY" or task.get("retry_after", 0) > now:
                 break
             before = len(state["events"])
-            record = receive_one(manifest, record, journal, item, access, run, permit, fetch, now)
+            record = receive_one(manifest, record, journal, item, access, run, permit, fetch, now, transport=transport)
             after = len(record["state"]["events"])
             sent += after - before
             if after == before:

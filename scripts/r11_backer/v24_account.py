@@ -34,7 +34,7 @@ def git(*args):
     return subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL, text=True, timeout=20)
 
 
-def inventory(ctx):
+def inventory(ctx, *, broker_workflow=WORKFLOW, entry_module="official_bulk_v24"):
     """Trace actual repository refs, including manually callable legacy workflows."""
     refs = sorted(ref for ref in git("for-each-ref", "--format=%(refname)", "refs/remotes/origin").splitlines()
                   if ref != "refs/remotes/origin/HEAD")
@@ -57,8 +57,8 @@ def inventory(ctx):
             same_group = bool(re.search(r"(?m)^  group: ['\"]?r12-1-bounded-preflight['\"]?$", text))
             reviewed.append({"ref": ref.removeprefix("refs/remotes/origin/"), "workflow": name,
                              "workflow_git_blob": blob, "same_concurrency_group": same_group,
-                             "uses_persistent_broker": same_group and name == WORKFLOW and
-                             "official_bulk_v24" in text, "workflow_dispatch": "workflow_dispatch:" in text})
+                             "uses_persistent_broker": same_group and name == broker_workflow and
+                             entry_module in text, "workflow_dispatch": "workflow_dispatch:" in text})
     github = GitHub()
     active = []
     workflow_paths = {r["workflow"] for r in reviewed}

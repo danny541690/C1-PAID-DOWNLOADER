@@ -296,9 +296,24 @@ def stage_original(manifest, item, task, access, packed):
     return file_id
 
 
-def receive(manifest, item, task, access, auth):
+def receive(manifest, item, task, access, auth, *, transport=None):
     try:
-        raw = fetch_original(auth, task_for(item), byte_limit=WINDOW_LIMIT)
+        if transport is None:
+            raw = fetch_original(auth, task_for(item), byte_limit=WINDOW_LIMIT)
+        else:
+            from .autonomous_quota import Deferred
+
+            identity = digest(encode(["LEGACY", item["task_id"], task["stage_id"], task["attempts"]]))
+            try:
+                outcome, response = transport.fetch(task_for(item).parameters(), WINDOW_LIMIT,
+                                                    identifier=identity, lane=item["lane"])
+            except Deferred as error:
+                return ("QUOTA_DEFERRED", str(error), error.due)
+            if not response:
+                if code := outcome.get("provider_code"):
+                    return ("HTTP", code, None)
+                return ("RETRY" if outcome["retryable"] else "HOLD", outcome["status"], None)
+            raw = response[0]
         require(len(raw) <= WINDOW_LIMIT, "SIZE_LIMIT")
         result = json.loads(raw)
         if isinstance(result, dict) and (code := provider_block_code(result.get("status"))):
@@ -317,12 +332,40 @@ def receive(manifest, item, task, access, auth):
     return ("STAGED", proof, None)
 
 
+def governed_wave(items, state, transport, now, workers, lane_limit):
+    lanes = {}
+    candidates = []
+    for row in items:
+        task = state["tasks"][row["task_id"]]
+        if task["status"] == "READY" and task.get("retry_after", 0) <= now:
+            lane = row["lane"]
+            entry = lanes.setdefault(lane, {"count": 0, "priority": 1, "wait_ms": 0})
+            entry["count"] += 1
+            entry["wait_ms"] = max(entry["wait_ms"], max(0, now - task.get("retry_after", now)) * 1000)
+            candidates.append(row)
+    if not candidates:
+        return []
+    plan = transport.broker.plan(lanes)
+    limit = workers or 1
+    used, wave = Counter(), []
+    # A slot is owned by B00, not by a worker. This selects the eligible working set.
+    for row in candidates:
+        lane = row["lane"]
+        if used[lane] >= min(lane_limit, plan["lane_allocations"].get(lane, 0)):
+            continue
+        wave.append(row)
+        used[lane] += 1
+        if len(wave) >= limit:
+            break
+    return wave
+
+
 def dispatch(manifest, record, journal, access, run, *, request_ceiling=None, workers=None, lane_limit=1,
-             permit=None, native_fetch=None):
+             permit=None, native_fetch=None, transport=None):
     if manifest.get("schema_version") == 24:
         from .bulk_batch import dispatch as native_dispatch
 
-        return native_dispatch(manifest, record, journal, access, run, permit=permit, fetch=native_fetch,
+        return native_dispatch(manifest, record, journal, access, run, permit=permit, fetch=native_fetch, transport=transport,
                                request_ceiling=request_ceiling)
     health = drive_health(access)
     require(health["status"] == "POSITIVE_CAPACITY_AND_BRONZE_ACCESS" and
@@ -338,12 +381,14 @@ def dispatch(manifest, record, journal, access, run, *, request_ceiling=None, wo
         remaining -= sum(event["kind"] == "download" and event["run"] == run for event in record["state"]["events"])
         if remaining <= 0:
             return record
-    auth = os.environ["FINMIND_BACKER_TOKEN"]
-    record = account_check(journal, record, run, auth)
+    auth = None if transport else os.environ["FINMIND_BACKER_TOKEN"]
+    if transport is None:
+        record = account_check(journal, record, run, auth)
     while True:
         now = int(time())
         current = record["state"]
-        wave = ready_wave(manifest["items"], current, now, worker_limit=workers, lane_limit=lane_limit)
+        wave = (governed_wave(manifest["items"], current, transport, now, workers, lane_limit) if transport else
+                ready_wave(manifest["items"], current, now, worker_limit=workers, lane_limit=lane_limit))
         if remaining is not None:
             wave = wave[:remaining]
         if not wave:
@@ -364,7 +409,8 @@ def dispatch(manifest, record, journal, access, run, *, request_ceiling=None, wo
         print(f"finmind_source_requests={len(wave)} active_lanes={len({row['lane'] for row in wave})}")
         pause, auth_hold = current["pause"], current.get("auth_hold", False)
         with ThreadPoolExecutor(max_workers=len(wave)) as pool:
-            results = [pool.submit(receive, manifest, row, tasks[row["task_id"]], access, auth) for row in wave]
+            results = [pool.submit(receive, manifest, row, tasks[row["task_id"]], access, auth, **(
+                {"transport": transport} if transport is not None else {})) for row in wave]
             for row, result in zip(wave, results, strict=True):
                 key = row["task_id"]
                 try:
@@ -373,16 +419,21 @@ def dispatch(manifest, record, journal, access, run, *, request_ceiling=None, wo
                     # Keep the reserved ID for recovery when upload success could not be determined.
                     tasks[key] = tasks[key] | {"reason": "STAGING_RESULT_UNCERTAIN"}
                     continue
-                if status == "STAGED":
+                if status == "QUOTA_DEFERRED":
+                    tasks[key] = current["tasks"][key] | {"reason": str(outcome)}
+                    deferred = max(now + 1, (after + 999) // 1000) if after else now + 15
+                    tasks[key]["retry_after"] = deferred
+                    events = [event for event in events if event["task_id"] != key or event["at"] != now or event["run"] != run]
+                elif status == "STAGED":
                     tasks[key] = tasks[key] | {"status": "STAGED", "proof": outcome}
                 elif status == "RETRY" or status == "HTTP" and outcome in QUOTA_BLOCK_CODES | {408, 500, 502, 503, 504}:
                     if outcome in QUOTA_BLOCK_CODES:
                         pause = max(pause, retry_deadline(after, int(time())))
                     tasks[key] = retry_state(tasks[key], str(outcome), int(time()))
                 else:
-                    auth_hold |= outcome in AUTH_BLOCK_CODES
+                    auth_hold |= outcome == 401 if transport else outcome in AUTH_BLOCK_CODES
                     tasks[key] = tasks[key] | {"status": "BLOCKED", "reason": str(outcome)}
-        record = advance(journal, record, tasks=tasks, pause=pause, auth_hold=auth_hold)
+        record = advance(journal, record, tasks=tasks, pause=pause, auth_hold=auth_hold, events=events)
         if remaining is not None:
             remaining -= len(wave)
             if remaining == 0:

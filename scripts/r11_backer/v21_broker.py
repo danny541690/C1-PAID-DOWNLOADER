@@ -24,6 +24,23 @@ HEADROOM_RESERVE = 1
 SNAPSHOT_VALID_SECONDS = 150
 
 
+def verify_migration_source(record, reported, task_id):
+    """Bind an in-place B00 migration to the last verified V2.4 usage checkpoint."""
+    if (not record or record["sequence"] != reported["checkpoint"]["sequence"] or
+            digest(encode(record)) != reported["checkpoint"]["sha256"] or
+            record["state"].get("mode") != MODE or record["state"].get("task_id") != task_id):
+        raise ValueError("B00_MIGRATION_PREDECESSOR_UNVERIFIED")
+    state = record["state"]
+    events = state["events"]
+    tracked = _counts(events)
+    totals = Counter(kind for _, kind in tracked.values())
+    if (len(tracked) != len(events) or totals["download"] != reported["reserved_data_requests"] or
+            totals["probe"] != reported["reserved_account_requests"] or
+            set(state["results"]) - tracked.keys()):
+        raise ValueError("B00_MIGRATION_COUNTERS_UNVERIFIED")
+    return events
+
+
 def sha(value):
     return isinstance(value, str) and bool(re.fullmatch("[0-9a-f]{64}", value))
 
