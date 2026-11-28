@@ -6,7 +6,7 @@ from unittest import TestCase
 from unittest.mock import Mock, patch
 
 from scripts.r11_backer import autonomous_quota as quota, bulk_batch, production_download
-from scripts.r11_backer.full_release_evidence import INDEX_SHA, approval, coverage_snapshot, legacy_item
+from scripts.r11_backer.full_release_evidence import INDEX_SHA, EvidenceStore, approval, coverage_snapshot, legacy_item
 from scripts.r11_backer.integration_pilot import digest, encode
 from scripts.r11_backer.production_full_history import CAMPAIGN, NAMESPACE, Runtime, initial_control
 from scripts.r11_backer.v25_account import FinMindTransport
@@ -65,6 +65,16 @@ class ReleaseTests(TestCase):
         self.assertEqual(coverage, json.loads(encode(coverage)))
         self.assertEqual(coverage["unique_verified_source_requests"], 1)
         self.assertEqual(coverage["intervals"]["TaiwanStockPrice"]["2388"], [[params["start_date"], params["end_date"]]])
+
+    def test_official_comparison_is_required_before_charging_an_unverifiable_window(self):
+        evidence = EvidenceStore("fixture", None)
+        item = {"start": "2020-01-01", "end": "2020-01-05", "request_id": "witness",
+                "completeness": {"method": "deferred_source_reconciliation", "verifier": "OFFICIAL_EXPECTED_KEYS"}}
+        self.assertEqual(evidence.reason_to_defer_primary(item), "V26R_B09_OFFICIAL_SOURCE_REQUIRED")
+        split = item | {"completeness": item["completeness"] | {"verifier": "PROVIDER_SPLIT"}}
+        self.assertIsNone(evidence.reason_to_defer_primary(split))
+        exploration = item | {"completeness": item["completeness"] | {"planned_class": "EXPLORATION"}}
+        self.assertIsNone(evidence.reason_to_defer_primary(exploration))
 
     def test_committing_b10_and_the_cursor_is_atomic_and_a_retry_does_not_count_again(self):
         initial = {"sequence": 51, "previous": None, "next_id": "52", "state":{"totals":{"VERIFIED":4749,"BLOCKED":51}}}

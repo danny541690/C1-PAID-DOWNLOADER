@@ -426,6 +426,11 @@ def main():
         from .executable_closeout_v26 import label
 
         evidence = label(error)
+        if args.profile == "integration":
+            from traceback import extract_tb
+
+            evidence["frames"] = [{"file": frame.filename.rsplit("/", 1)[-1], "line": frame.lineno, "function": frame.name}
+                                  for frame in extract_tb(error.__traceback__) if "/scripts/r11_backer/" in frame.filename]
         print(json.dumps({"state": "HOLD", "phase": args.phase, "error": evidence}, sort_keys=True))
         raise SystemExit(1) from None
 

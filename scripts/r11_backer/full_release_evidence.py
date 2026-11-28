@@ -230,6 +230,20 @@ class EvidenceStore:
         require(digest(raw) == approved["sha256"], "V26R_OFFICIAL_PROOF_DIGEST")
         return json.loads(raw)
 
+    def reason_to_defer_primary(self, item):
+        completeness = item["completeness"]
+        if (completeness["method"] != "deferred_source_reconciliation" or completeness.get("planned_class") == "EXPLORATION"
+                or completeness.get("verifier") == "PROVIDER_SPLIT" and item["start"] < item["end"]):
+            return None
+        try:
+            witness = self.official(item)
+            if witness is None:
+                return "V26R_B09_OFFICIAL_SOURCE_REQUIRED"
+            v26_acceptance.read_comparison(item, witness)
+        except (KeyError, TypeError, ValueError):
+            return "V26R_B09_OFFICIAL_SOURCE_INVALID"
+        return None
+
     def collect(self, item, transport, capacity, now):
         if item["completeness"].get("verifier") != "PROVIDER_SPLIT" or item["start"] == item["end"]:
             return {"state": "AVAILABLE" if self.official(item) else "INDEPENDENT_SOURCE_PENDING"}

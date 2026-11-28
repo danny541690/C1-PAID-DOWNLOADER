@@ -249,10 +249,18 @@ class Runtime:
             if batch is None:
                 return {"state": deferred or "COMPLETE", "stage": phase}
         row = store.head()
+        evidence = self.evidence(current, create=True)
+        ready = row["state"]["tasks"]
+        blocked = {}
+        for item in batch["items"]:
+            key = item["task_id"]
+            if ready[key]["status"] == "READY" and (reason := evidence.reason_to_defer_primary(item)):
+                blocked[key] = ready[key] | {"status": "REPAIR", "reason": reason}
+        if blocked:
+            row = advance(store, row, tasks=ready | blocked)
         with self.transport(batch) as transport:
             if transport.broker.book["auth_hold"]:
                 return {"state": "STOP_AUTH"}
-            evidence = self.evidence(current, create=True)
             before = len(row["state"]["events"])
             expired_now = int(time()) + 91 if self.isolation and phase == "resume" else None
             if expired_now:

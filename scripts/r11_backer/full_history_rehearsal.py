@@ -43,7 +43,7 @@ def origin_run(origin=None, *, allow_active=False):
 
 
 def integration_root(access, sealed, origin, *, create=False):
-    audit = private_path(access, sealed.version, ATTACH, create=create)
+    audit = private_path(access, sealed.version, ATTACH)
     return private_path(access, audit, f"{origin}_1", create=create)
 
 
@@ -160,9 +160,10 @@ def coverage_for_rehearsal(sealed, active):
 
 
 def handover(access, sealed, issuer):
-    root = integration_root(access, sealed, issuer, create=True)
+    # H never creates the dispatch job's per-Run folder.
+    root = private_path(access, sealed.version, ATTACH)
     proof = sealed.read("BASELINE_PROOFS.json")
-    write_json(root, "H_LINE.json", {"task_id": TASK_ID, "base_run": BASE_RUN, "prior_proofs_sha256": digest(encode(proof)),
+    write_json(root, f"H_LINE_{issuer}_1.json", {"task_id": TASK_ID, "base_run": BASE_RUN, "prior_proofs_sha256": digest(encode(proof)),
         "original_manifest_immutable": True, "production_dispatch_authorized": False, "live_api_requests": 0,
         "origin_run": issuer}, access)
 
@@ -231,11 +232,12 @@ def report(access, sealed, issuer):
         jobs[str(ident)] = {a["name"]: {k: a[k] for k in ("id", "status", "conclusion", "html_url")} for a in rows}
     lock = read_json_file(root, "LOCK.json", access)
     current = immutable_state(sealed)
-    names = ("LOCK.json", "H_LINE.json", "CROSS_RUN_CHECKPOINT.json", "ENGINE_TESTS.json")
+    names = ("LOCK.json", f"H_LINE_{issuer}_1.json", "CROSS_RUN_CHECKPOINT.json", "ENGINE_TESTS.json")
+    handover_parent = private_path(access, sealed.version, ATTACH)
     refs = {}
     for name in names:
         try:
-            fid, data = original(access, root, name)
+            fid, data = original(access, handover_parent if name.startswith("H_LINE_") else root, name)
             refs[name] = {"file_id": fid, "sha256": digest(data)}
         except (OSError, ValueError, RuntimeError):
             continue
