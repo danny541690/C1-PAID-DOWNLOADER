@@ -40,7 +40,7 @@ RESUMABLE = {"H", "G05_A", "G04_OFFLINE", "G05_B", "G07_STAGE", "G07"}
 PRESERVED = {"G00": "LOCK", "G01": "H", "G06": "G06", "G07": "G07", "G08": "G08"}
 ARTIFACTS = {"LOCK": ("INPUT_LOCK.json",), "H": ("HANDOVER_EVIDENCE.json", "V25_DECISION.json"),
              "G05_A": ("QUOTA_POLICY.json", "CONSUMER_INVENTORY.json", "QUOTA_MIGRATION.json"),
-             "G03_OFFICIAL": ("CONTRACT_REVIEW.json", "PROBE_PLAN.json"),
+             "G03_OFFICIAL": ("CONTRACT_REVIEW.json", "PROBE_PLAN.json", "OFFICIAL_HISTORY_SOURCE_LOCK.json"),
              "G04_OFFLINE": ("HISTORY_AXES_INPUT.json", "ACTIVE_BATCH_RECONCILIATION.json", "B09_QUEUE.json", "BRONZE_STORAGE_RULE.json"),
              "G05_B": ("PROBE_RESULTS.json", "PROBE_LEDGER.json", "10MIN_REBALANCE.json"),
              "G03_FINAL": ("DATASET_REGISTRY.json", "CONTRACT_GAP_MATRIX.json"),
@@ -96,7 +96,8 @@ class V25Context(Context):
         return json.loads(raw)
 
     def binary(self, name, raw, media):
-        require(re.fullmatch(r"PROBE_[0-9a-f]{64}\.json\.gz", name), "V25_PROBE_RAW_FILENAME")
+        require((media == "application/gzip" and re.fullmatch(r"PROBE_[0-9a-f]{64}\.json\.gz", name)) or
+                (media == "application/zip" and name == v25_contracts.HISTORY_ORIGINALS), "V25_BINARY_FILENAME")
         key = ensure(self.root, name, media, self.access, raw, create=True)
         verify_private_folder(key, self.access)
         require(read_drive_bytes(key, self.access, len(raw)) == raw, "V25_PROBE_ORIGINAL_READBACK")

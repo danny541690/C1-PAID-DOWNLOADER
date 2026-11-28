@@ -1,13 +1,14 @@
 """Close the V2.4 contract gaps from pinned documents and bounded original replies."""
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from datetime import date
 import gzip
 from io import BytesIO
 import json
 import re
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from .bulk_manifest import adapt_rule
 from .drive_pilot import ensure
@@ -20,7 +21,7 @@ from .release_probes import contracts, read_private_file
 from .release_rehearsal import require, root_folder
 from .tpex_history import ARCHIVE, verified_archive_files
 from .v2_registry import NativeContract, read_rows
-from .v24_sources import DATE_BOUND, TOPIC, plain
+from .v24_sources import DATE_BOUND, TOPIC, plain, public_read
 
 HIGH_FREQUENCY = {"TaiwanFutOptTickInfo", "TaiwanFuturesKBar", "TaiwanFuturesSpreadTick", "TaiwanStockKBar"}
 PRIOR_FOUR = {"TaiwanFuturesFinalSettlementPrice", "TaiwanStockParValueChange", "TaiwanStockActiveETFInfo", "TaiwanStockTradingDate"}
@@ -33,6 +34,21 @@ TECHNICAL_BOUNDS = {
     "TaiwanStockPER": "perpbr-taiwanstockper",
     "TaiwanStockPriceLimit": "taiwanstockpricelimit-backersponsor",
 }
+HISTORY_PAGES = {"CnnIndex": "Others", "TaiwanBusiness": "TaiwanMarket/Others", "ConvertibleBond": "TaiwanMarket/ConvertibleBond"}
+HISTORY_BOUNDS = {
+    "CnnFearGreedIndex": ("CnnIndex", "cnnfeargreedindex-backersponsor"),
+    "TaiwanBusinessIndicator": ("TaiwanBusiness", "taiwanbusinessindicator-backersponsor"),
+    "TaiwanAssetSwapFixedIncomeDaily": ("ConvertibleBond", "taiwanassetswapfixedincomedaily-backersponsor"),
+    "TaiwanAssetSwapOptionDaily": ("ConvertibleBond", "taiwanassetswapoptiondaily-backersponsor"),
+    "TaiwanStockConvertibleBondMonthlyAnalysis": ("ConvertibleBond", "taiwanstockconvertiblebondmonthlyanalysis-backersponsor"),
+    "TaiwanStockConvertibleBondPutProvision": ("ConvertibleBond", "taiwanstockconvertiblebondputprovision-backersponsor"),
+}
+CONVERTIBLE_DAY = {
+    "TaiwanStockConvertibleBondDaily": "backersponsor", "TaiwanStockConvertibleBondInstitutionalInvestors": "backersponsor_1",
+    "TaiwanStockConvertibleBondDailyOverview": "backersponsor_2", "TaiwanAssetSwapFixedIncomeDaily": "backersponsor_3",
+    "TaiwanAssetSwapOptionDaily": "backersponsor_4",
+}
+HISTORY_ORIGINALS = "OFFICIAL_HISTORY_SOURCE_ORIGINALS.zip"
 PROBES = (
     ("TaiwanFuturesFinalSettlementPrice", "B08", 4, "Backer", {"data_id": "TX", "start_date": "2024-01-17", "end_date": "2024-01-17"}, "Derivative", "taiwanfuturesfinalsettlementprice-backersponsor"),
     ("TaiwanStockTradingDate", "B01", 3, "Free", {}, "Technical", "taiwanstocktradingdate"),
@@ -55,16 +71,40 @@ def official_inputs(ctx):
     return lock, bodies
 
 
-def technical_bound(row, raw, source):
+def historical_sources(ctx):
+    def fetch(entry):
+        key, path = entry
+        url = f"https://finmind.github.io/tutor/{path}/"
+        try:
+            data = public_read(url)
+            return key, data, {"source": key, "url": url, "sha256": digest(data), "bytes": len(data)}, None
+        except (OSError, RuntimeError, ValueError) as error:
+            return key, None, None, type(error).__name__
+
+    source, raw, findings = {}, {}, {}
+    with ThreadPoolExecutor(max_workers=len(HISTORY_PAGES)) as pool:
+        for key, data, ref, error in pool.map(fetch, HISTORY_PAGES.items()):
+            if error:
+                findings[key] = error
+            else:
+                source[key], raw[key] = ref, data
+    payload = BytesIO()
+    with ZipFile(payload, "w") as archive:
+        for name, data in sorted(raw.items()):
+            archive.writestr(ZipInfo(f"{name}.html"), data, compress_type=ZIP_DEFLATED)
+    packed = payload.getvalue()
+    file_id = ctx.binary(HISTORY_ORIGINALS, packed, "application/zip")
+    return raw, {"sources": source, "findings": findings, "originals": {"file_id": file_id, "sha256": digest(packed)},
+                 "charged_finmind_api": 0}
+
+
+def documented_bound(row, raw, source, anchor):
     """Read the official section by label, including anchors with Chinese title prefixes."""
     dataset = row["dataset"]
-    if dataset not in TECHNICAL_BOUNDS:
-        return row
-    anchor = TECHNICAL_BOUNDS[dataset]
     match = next((m for m in TOPIC.finditer(raw.decode()) if m[1] == anchor), None)
-    require(match is not None and dataset in plain(match[2]), "V25_TECHNICAL_SECTION_BINDING")
+    require(match is not None and dataset in plain(match[2]), "V25_DOCUMENTED_SECTION_BINDING")
     bound = DATE_BOUND.search(plain(match[3]))
-    require(bound is not None, "V25_TECHNICAL_DOCUMENTED_BOUND")
+    require(bound is not None, "V25_DOCUMENTED_START")
     first = str(date.fromisoformat(bound[1]))
     assert first == bound[1]
     result = row | {"source_dates_documented_from": sorted(set(row["source_dates_documented_from"]) | {first}),
@@ -77,18 +117,35 @@ def technical_bound(row, raw, source):
     return result
 
 
+def convertible_day(row, raw, source, anchor):
+    match = next((m for m in TOPIC.finditer(raw.decode()) if m[1] == anchor), None)
+    require(match is not None and all(item in plain(match[2]).lower() for item in ("特定日期", "所有資料", "backer")) and
+            row["dataset"] in match[3], "V25_CONVERTIBLE_MARKET_DAY_DOCUMENTATION")
+    rule = adapt_rule(NativeContract(**row["schema"]), "MARKET_DAY", 4 * 1024 * 1024)
+    return row | {"mode_contracts": row["mode_contracts"] | {"MARKET_DAY": asdict(rule)},
+                  "evidence": row["evidence"] + [source | {"anchor": anchor, "mode": "MARKET_DAY", "tier": "Backer"}]}
+
+
 def offline(ctx):
     baseline = ctx.prior("DATASET_REGISTRY.json")
     require(baseline["counts"] == {"CONTRACT_READY": 66, "EXCLUDED": 19, "HOLD": 18}, "V25_CONTRACT_BASELINE")
     lock, records = official_inputs(ctx)
+    extra_raw, history = historical_sources(ctx)
     docs = contracts(records["MCP"].decode("utf-8"))
     ready, excluded, holds = set(), set(), set()
     rows, decisions = [], []
     for row in baseline["rows"]:
         dataset = row["dataset"]
         if row["state"] == "CONTRACT_READY":
-            rows.append(technical_bound(row, records["Technical"], lock["sources"]["Technical"]) |
-                        {"v25": "INHERITED_CONTRACT_READY"})
+            if dataset in TECHNICAL_BOUNDS:
+                row = documented_bound(row, records["Technical"], lock["sources"]["Technical"], TECHNICAL_BOUNDS[dataset])
+            if dataset in HISTORY_BOUNDS:
+                page, anchor = HISTORY_BOUNDS[dataset]
+                if page in extra_raw:
+                    row = documented_bound(row, extra_raw[page], history["sources"][page], anchor)
+            if dataset in CONVERTIBLE_DAY and "ConvertibleBond" in extra_raw:
+                row = convertible_day(row, extra_raw["ConvertibleBond"], history["sources"]["ConvertibleBond"], CONVERTIBLE_DAY[dataset])
+            rows.append(row | {"v25": "INHERITED_CONTRACT_READY"})
             ready.add(dataset)
             continue
         if row["state"] == "EXCLUDED":
@@ -119,7 +176,8 @@ def offline(ctx):
     require(set(row["parameters"]["dataset"] for row in selected) == PRIOR_FOUR, "V25_TARGETED_WITNESS_PLAN")
     return "PASS", {"CONTRACT_REVIEW.json": {"rows": rows, "initial_holds": sorted(holds), "new_decisions": decisions,
         "official_sources": lock["sources"], "previous_ready": len(ready), "previous_excluded": len(excluded)},
-        "PROBE_PLAN.json": {"selected": selected, "purpose": "NEEDED_NONREPEATING_NATIVE_WITNESSES"}}
+        "PROBE_PLAN.json": {"selected": selected, "purpose": "NEEDED_NONREPEATING_NATIVE_WITNESSES"},
+        "OFFICIAL_HISTORY_SOURCE_LOCK.json": history}
 
 
 def original_probe(ctx, record):

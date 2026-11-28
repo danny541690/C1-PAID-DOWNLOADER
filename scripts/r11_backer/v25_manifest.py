@@ -193,7 +193,7 @@ def build_partition(row, axes, archive_by_dataset):
             continue
         need_id = "data_id" in row["mode_contracts"][mode]["required_parameters"]
         if mode == "MARKET_DAY":
-            if row["grain"] not in M1_GRAINS or not axes["trading_dates"] or not name.startswith("TaiwanStock"):
+            if row["grain"] not in M1_GRAINS or not axes["trading_dates"] or not name.startswith(("TaiwanStock", "TaiwanAssetSwap")):
                 continue
             selectors = base | {"mode": mode, "selector": "REFERENCE_TRADING_CALENDAR", "observed_data_ids": []}
             if documented_start < axes["trading_dates"][0]:
@@ -275,7 +275,9 @@ def final(ctx):
     axes = {"issuer_intervals": offline["issuer_intervals"], "source_witnesses": offline["source_witnesses"],
             "existing_market_query_days": offline["existing_market_query_days"], "legacy_receipt_intervals": by_dataset}
     cal = next((r.get("v25_witness", {}) for r in registry if r["dataset"] == "TaiwanStockTradingDate"), {})
-    axes["trading_dates"] = cal.get("observed_dates") or offline["certified_2026_sessions"]
+    dates = cal.get("observed_dates") or []
+    missing_sessions = sorted(set(offline["certified_2026_sessions"]) - set(dates))
+    axes["trading_dates"] = dates if dates and not missing_sessions else offline["certified_2026_sessions"]
     archive_by_dataset = defaultdict(list)
     for row in reuse["archive_intervals"]:
         archive_by_dataset[row["dataset"]].append(row)
@@ -298,6 +300,11 @@ def final(ctx):
     native = offline["native_compilable_legacy_windows"]
     native_body = {"schema_version": SCHEMA, "rows": native}
     native_name = "V24_MANIFEST_COMPATIBLE_V25.json"
+    bounded = defaultdict(set)
+    for window in native:
+        if window["completeness"]["method"] == "expected_keys":
+            bounded[window["dataset"]].update(digest(encode(key)) for key in window["completeness"]["keys"])
+    known_denominator = {dataset: len(keys) for dataset, keys in sorted(bounded.items())}
     # The V2.4 native engine consumes the strict subset unchanged. Other shards contain
     # actual routable selector definitions with a separate planned/verification status.
     pending_scope = history_denominator(registry, partitions, gaps)
@@ -311,6 +318,7 @@ def final(ctx):
            "frozen_2026_candidate_windows": offline["known_legacy_scope"],
            "frozen_legacy_plan_read_only_sha256": ctx.master["state"]["plan_sha"],
            "legacy_ready_receipts": offline["legacy_receipt_count"], "active_verified": offline["active_verified"],
+           "independently_bounded_expected_native_keys": known_denominator,
            "planned_scope_http_requests": planning["counted_http_requests"], "planned_scope_datasets": len(partitions),
            "eligible_contract_count": sum(r["state"] == "CONTRACT_READY" for r in registry),
            "physical_requests_distinct_from_evidenced_logical_coverage": True,
@@ -320,6 +328,9 @@ def final(ctx):
         "MANIFEST_INDEX.json": idx,
         "HISTORICAL_UNIVERSE.json": {"rows": partitions, "unknown": gaps, "universe_complete": pending_scope is not None,
             "issuer_source_references": offline["official_reconciliation_sources"], "calendar_source": cal or "V24_OFFICIAL_2026_ONLY",
+            "calendar_reconciliation": {"prior_verified_2026_sessions": len(offline["certified_2026_sessions"]),
+                                        "dates_in_archived_snapshot": len(dates), "missing_in_snapshot": missing_sessions,
+                                        "uses_original_snapshot": bool(dates and not missing_sessions)},
             "six_source_reverification_needed": False, "verified_receipts_keep_their_own_denominator": True},
         "REUSE_MAP.json": reuse | {"read_back_active_valid": offline["active_verified"], "new_native_witnesses_reusable": [r["v25_witness"]
                                      for r in registry if r.get("v25_witness")], "new_formal_downloads": 0},
