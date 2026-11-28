@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.r11_backer import v2_resources
-from scripts.r11_backer.quota import NORMAL_LIMIT, TOTAL_LIMIT, next_reservation_at
+from scripts.r11_backer.quota import TOTAL_LIMIT, next_reservation_at
 
 
 SPEC = "c" * 64
@@ -54,10 +54,12 @@ class V2ResourceTests(unittest.TestCase):
 
     def test_saved_external_usage_and_429_pause_apply_to_entire_account(self):
         journal = Journal({"sequence": 0, "state": v2_resources.probe_state(SPEC)})
-        external = [{"kind": "download", "at": 10, "request_id": str(i)} for i in range(NORMAL_LIMIT)]
+        external = [{"kind": "download", "at": 10, "request_id": str(i)} for i in range(TOTAL_LIMIT)]
         self.assertEqual(self.reserve(journal, "download", "new", 11, shared_events=external),
                          "ACCOUNT_LIMIT_OR_COOLDOWN")
-        self.assertEqual(self.reserve(journal, "probe", "account", 11, shared_events=external), "RESERVED")
+        self.assertEqual(self.reserve(journal, "probe", "account-full", 11, shared_events=external),
+                         "ACCOUNT_LIMIT_OR_COOLDOWN")
+        self.assertEqual(self.reserve(journal, "probe", "account", 11, shared_events=external[:-1]), "RESERVED")
         self.assertTrue(v2_resources.record_probe_block(journal, journal.record, 429, 11,
                                                         spec_sha=SPEC, retry_after="180"))
         self.assertEqual(self.reserve(journal, "probe", "too-soon", 190), "ACCOUNT_LIMIT_OR_COOLDOWN")
@@ -65,9 +67,9 @@ class V2ResourceTests(unittest.TestCase):
         self.assertTrue(v2_resources.record_probe_block(journal, journal.record, 403, 200, spec_sha=SPEC))
         self.assertEqual(self.reserve(journal, "probe", "forbidden", 7200), "HOLD_AUTHORIZATION")
 
-    def test_next_slot_checks_both_caps_at_the_rolling_boundary(self):
-        events = [(200, "download")] * NORMAL_LIMIT + [(100, "probe")] * (TOTAL_LIMIT - NORMAL_LIMIT)
-        self.assertEqual(next_reservation_at(events, 300, "download"), 3800)
+    def test_next_slot_uses_shared_rolling_boundary_for_data_and_account(self):
+        events = [(200, "download")] * (TOTAL_LIMIT - 1) + [(100, "probe")]
+        self.assertEqual(next_reservation_at(events, 300, "download"), 3700)
         self.assertEqual(next_reservation_at(events, 300, "probe"), 3700)
         self.assertEqual(next_reservation_at(events, 3800, "download"), 3800)
 

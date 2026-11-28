@@ -122,13 +122,14 @@ class DispatchTests(unittest.TestCase):
 
 
 class RollingQuotaTests(unittest.TestCase):
-    def test_download_cap_reserve_and_full_account_cap(self):
-        from scripts.r11_backer.quota import can_reserve
+    def test_downloads_and_other_attempts_share_the_full_account_cap(self):
+        from scripts.r11_backer.quota import TOTAL_LIMIT, can_reserve
 
         downloads = [(100, "download")] * 1200
-        self.assertFalse(can_reserve(downloads, 3699, "download"))
+        self.assertTrue(can_reserve(downloads, 3699, "download"))
         self.assertTrue(can_reserve(downloads, 3699, "retry"))
-        full = downloads + [(100, "retry")] * 400
+        full = downloads + [(100, "retry")] * (TOTAL_LIMIT - len(downloads))
+        self.assertFalse(can_reserve(full, 3699, "download"))
         self.assertFalse(can_reserve(full, 3699, "retry"))
         self.assertFalse(can_reserve(full, 3699, "probe"))
         self.assertTrue(can_reserve(full, 3700, "download"))
