@@ -88,6 +88,53 @@ def fetch_original(auth, task=TASK, *, byte_limit=RAW_LIMIT):
         return response.read(byte_limit + 1)
 
 
+def fetch_native_payload(auth, parameters, byte_limit):
+    """Read exactly one native page at a time with a decoded-byte and HTTP framing bound."""
+    from .bulk_manifest import ENDPOINT, MAX_RAW
+
+    require(auth and type(byte_limit) is int and 0 < byte_limit <= MAX_RAW, "NATIVE_FETCH_LIMIT")
+    request = Request(f"{ENDPOINT}?{urlencode(parameters)}", headers={
+        "Authorization": f"Bearer {auth}", "Accept": "application/json", "Accept-Encoding": "identity",
+    })
+    with build_opener(NoRedirect()).open(request, timeout=25) as response:
+        require(response.status == 200 and not response.headers.get("Content-Range") and
+                not response.headers.get("Link"), "PARTIAL_HTTP_RESPONSE")
+        encoding = response.headers.get("Content-Encoding", "identity").lower()
+        require(encoding in {"identity", "gzip"}, "UNEXPECTED_ENCODING")
+        length = response.headers.get("Content-Length")
+        if length is not None:
+            require(length.isascii() and length.isdecimal() and len(length) < 12, "INVALID_CONTENT_LENGTH")
+            length = int(length)
+            if encoding == "identity":
+                require(length <= byte_limit, "NATIVE_RESPONSE_LIMIT")
+
+        def decode(stream):
+            data = bytearray()
+            while chunk := stream.read(min(64 * 1024, byte_limit + 1 - len(data))):
+                data.extend(chunk)
+                require(len(data) <= byte_limit, "NATIVE_RESPONSE_LIMIT")
+            return bytes(data)
+
+        if encoding == "gzip":
+            class Counted:
+                encoded_bytes = 0
+
+                def read(self, count):
+                    data = response.read(count)
+                    self.encoded_bytes += len(data)
+                    require(self.encoded_bytes <= byte_limit + byte_limit // 256 + 1024, "NATIVE_ENCODED_RESPONSE_LIMIT")
+                    return data
+
+            counted = Counted()
+            with gzip.GzipFile(fileobj=counted) as stream:
+                raw = decode(stream)
+            require(length is None or length == counted.encoded_bytes, "TRUNCATED_CONTENT_LENGTH")
+        else:
+            raw = decode(response)
+            require(length is None or len(raw) == length, "TRUNCATED_CONTENT_LENGTH")
+        return raw, encoding
+
+
 def management_folder(access, *, create):
     location = ROOT
     verify_private_folder(location, access)

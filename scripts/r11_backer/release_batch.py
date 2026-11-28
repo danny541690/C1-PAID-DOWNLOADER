@@ -317,7 +317,13 @@ def receive(manifest, item, task, access, auth):
     return ("STAGED", proof, None)
 
 
-def dispatch(manifest, record, journal, access, run, *, request_ceiling=None, workers=None, lane_limit=1):
+def dispatch(manifest, record, journal, access, run, *, request_ceiling=None, workers=None, lane_limit=1,
+             permit=None, native_fetch=None):
+    if manifest.get("schema_version") == 24:
+        from .bulk_batch import dispatch as native_dispatch
+
+        return native_dispatch(manifest, record, journal, access, run, permit=permit, fetch=native_fetch,
+                               request_ceiling=request_ceiling)
     health = drive_health(access)
     require(health["status"] == "POSITIVE_CAPACITY_AND_BRONZE_ACCESS" and
             health["available_bytes"] >= manifest["capacity_bound"], "BATCH_CAPACITY_CHANGED")
@@ -422,6 +428,11 @@ def _accept_item(manifest, item, task, parent, access, proof):
 
 def accept(manifest, record, journal, access, *, audit=False, workers=1, reread_verified=True,
            proof=None, resolve_destination=None):
+    if manifest.get("schema_version") == 24:
+        from .bulk_batch import accept as native_accept
+
+        return native_accept(manifest, record, journal, access, destination=resolve_destination or destination,
+                             audit=audit, reread_verified=reread_verified)
     tasks = deepcopy(record["state"]["tasks"])
     parents, selected = {}, []
     for item in manifest["items"]:

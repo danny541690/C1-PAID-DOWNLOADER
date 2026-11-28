@@ -129,6 +129,15 @@ def candidate_windows(plan):
                 yield dataset, code, market, start, end, days
 
 
+def prepare_native_segment(index, read, journal, access, stage, *, resolve_destination=None,
+                           known_requests=(), known_coverage=()):
+    """Load a hashed native manifest into the existing B01–B10 journal interface."""
+    from .bulk_batch import prepare
+
+    return prepare(index, read, journal, access, stage, resolve_destination or release_batch.destination,
+                   known_requests=known_requests, known_coverage=known_coverage)
+
+
 def storage_bytes(windows):
     # Four possible staged gzip files, the final file, and bounded journals per batch.
     return windows * (MAX_ATTEMPTS + 1) * (WINDOW_LIMIT + 1024) + ceil(windows / BATCH_SIZE) * 16 * 1024 * 1024
@@ -359,8 +368,13 @@ def accept_segment(folder, manifest, journal, record, master_journal, master, ac
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("launch", "continue", "accept"))
+    parser.add_argument("phase", choices=("launch", "continue", "accept", "validate-native"))
     phase = parser.parse_args().phase
+    if phase == "validate-native":
+        from .official_bulk_v24 import run_job
+
+        run_job("G06")
+        return
     try:
         run = int(os.environ["GITHUB_RUN_ID"])
         access = token()

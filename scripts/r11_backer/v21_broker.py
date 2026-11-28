@@ -77,7 +77,25 @@ def validate_checkpoint(state, genesis):
         raise ValueError("BROKER_CHECKPOINT_USAGE")
 
 
-def reserve(journal, previous, *, kind, request_id, now, run, admission):
+def acquire_lease(journal, previous, *, run, attempt, now, expires_at, spec_sha, evidence_sha):
+    """Acquire a time-bounded permit in the task's existing durable quota ledger."""
+    state = previous["state"]
+    if (state.get("mode") != MODE or not sha(spec_sha) or not sha(evidence_sha) or
+            type(expires_at) is not int or expires_at < now + 30):
+        raise ValueError("INVALID_ACCOUNT_LEASE")
+    owner = {"run_id": run, "attempt": attempt, "spec_sha": spec_sha, "evidence_sha256": evidence_sha}
+    current = state.get("active_lease")
+    if current and current["expires_at"] > now:
+        return current if all(current.get(k) == v for k, v in owner.items()) else None
+    identifier = digest(encode(owner | {"began_at": now, "expires_at": expires_at}))
+    granted = owner | {"lease_id": identifier, "began_at": now, "expires_at": expires_at}
+    if not journal.append(previous, state | {"active_lease": granted}):
+        return None
+    observed = journal.head()
+    return granted if observed and observed["state"].get("active_lease") == granted else None
+
+
+def reserve(journal, previous, *, kind, request_id, now, run, admission, bootstrap=False):
     """Charge one one-use request before sending it under a verified account-wide lease."""
     state = previous["state"]
     if state.get("mode") != MODE or state.get("task_id") != TASK_ID or kind not in LIMITS or not request_id:
@@ -94,13 +112,28 @@ def reserve(journal, previous, *, kind, request_id, now, run, admission):
         return "TASK_LIMIT"
     if now < state["paused_until"]:
         return "ACCOUNT_COOLDOWN"
-    if (admission.get("task_id") != TASK_ID or admission.get("spec_sha") != state["spec_sha"] or
+    lease_id = admission.get("lease_id")
+    lease = state.get("active_lease", {})
+    if lease_id is not None or bootstrap:
+        if (not lease_id or lease.get("lease_id") != lease_id or lease.get("run_id") != run or
+                lease.get("expires_at", 0) < now + 25 or
+                lease.get("evidence_sha256") != admission.get("account_ownership_evidence_sha256")):
+            return "HOLD_DURABLE_ACCOUNT_LEASE_REQUIRED"
+        active_spec = lease["spec_sha"]
+    else:
+        active_spec = state["spec_sha"]
+    if (admission.get("task_id") != TASK_ID or admission.get("spec_sha") != active_spec or
             not sha(admission.get("account_ownership_evidence_sha256")) or
             admission.get("all_consumers_in_broker") is not True or
             admission.get("exclusive_account_lease_read_back") is not True):
         return "HOLD_ACCOUNT_WIDE_OWNERSHIP_UNVERIFIED"
-    provider = admission.get("provider_snapshot", {})
+    provider = admission.get("bootstrap_basis" if bootstrap else "provider_snapshot", {})
     at, limit, used = provider.get("observed_at"), provider.get("api_request_limit"), provider.get("user_count")
+    # For the first user_info call the numbers are independently evidenced bounds.
+    # They never become the provider snapshot used by data permits.
+    if bootstrap and (kind != "probe" or provider.get("kind") != "VERIFIED_ROLLING_WINDOW_BOUND" or
+                      provider.get("exclusive_since", now) > now - 3600):
+        return "HOLD_FIRST_PROBE_BASIS_UNVERIFIED"
     if (type(at) is not int or not 0 <= now - at <= SNAPSHOT_VALID_SECONDS or
             type(limit) is not int or type(used) is not int or not 0 <= used <= limit or
             not sha(provider.get("evidence_sha256"))):
@@ -113,7 +146,8 @@ def reserve(journal, previous, *, kind, request_id, now, run, admission):
     if total <= 0 or not can_reserve(events.values(), now, kind, normal_limit=normal, total_limit=total,
                                      paused_until=state["paused_until"]):
         return "ACCOUNT_LIMIT"
-    event = {"request_id": request_id, "kind": kind, "at": now, "run": run, "nonce": uuid4().hex}
+    event = {"request_id": request_id, "kind": kind, "at": now, "run": run, "nonce": uuid4().hex,
+             **({"lease_id": lease_id, "bootstrap": bootstrap} if lease_id else {})}
     return "RESERVED" if journal.append(previous, state | {"events": [*owned, event]}) else "CAS_CONFLICT"
 
 
@@ -126,18 +160,29 @@ def provider_block(state, code, now, retry_after=None):
     raise ValueError("UNEXPECTED_PROVIDER_BLOCK")
 
 
-def account_probe(journal, previous, *, request_id, now, run, admission, token):
+def commit_result(journal, confirmed, request_id, result, *, code=None, retry_after=None):
+    """Record one provider outcome and share any cooled-down or denied status across callers."""
+    state = confirmed["state"]
+    if code in QUOTA_BLOCK_CODES | AUTH_BLOCK_CODES:
+        state = provider_block(state, code, result["observed_at"], retry_after)
+        result = result | {"paused_until": state["paused_until"]}
+    if not journal.append(confirmed, state | {"results": state["results"] | {request_id: result}}):
+        return result | {"status": "HOLD_PROBE_RESULT_WRITE_UNCERTAIN"}
+    return result
+
+
+def account_probe(journal, previous, *, request_id, now, run, admission, token, bootstrap=False):
     """Send only user_info after durable reservation. A future bounded attempt needs a new ID."""
     if not token:
         return {"status": "HOLD_ACCOUNT_CREDENTIAL_UNAVAILABLE", "actual_requests": 0}
-    decision = reserve(journal, previous, kind="probe", request_id=request_id, now=now, run=run, admission=admission)
+    decision = reserve(journal, previous, kind="probe", request_id=request_id, now=now, run=run, admission=admission,
+                       bootstrap=bootstrap)
     if decision != "RESERVED":
         return {"status": decision, "actual_requests": 0}
     confirmed = journal.head()
     if (confirmed is None or confirmed["sequence"] != previous["sequence"] + 1 or
             confirmed["state"]["events"][-1]["request_id"] != request_id):
         return {"status": "HOLD_PROBE_RESERVATION_READBACK", "actual_requests": 0}
-    state = confirmed["state"]
     code, retry_after = None, None
     try:
         payload = read_json(ACCOUNT, token)
@@ -159,10 +204,5 @@ def account_probe(journal, previous, *, request_id, now, run, admission, token):
         report = {"status": "HOLD_PROVIDER_RESPONSE", "error_class": type(error).__name__,
                   "transient": transient(error)}
     received_at = max(now, int(time()))
-    if code:
-        state = provider_block(state, code, received_at, retry_after)
-        report["paused_until"] = state["paused_until"]
     result = report | {"actual_requests": 1, "observed_at": received_at}
-    if not journal.append(confirmed, state | {"results": state["results"] | {request_id: result}}):
-        return result | {"status": "HOLD_PROBE_RESULT_WRITE_UNCERTAIN"}
-    return result
+    return commit_result(journal, confirmed, request_id, result, code=code, retry_after=retry_after)
