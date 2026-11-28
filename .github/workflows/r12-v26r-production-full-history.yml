@@ -161,6 +161,7 @@ jobs:
       actions: read
     outputs:
       continue_now: ${{ steps.next.outputs.continue_now }}
+      control_state: ${{ steps.next.outputs.control_state || steps.admission.outputs.control_state }}
     env:
       R12R_ACTIVE_RELEASE_FILE_ID: ${{ vars.R12R_ACTIVE_RELEASE_FILE_ID }}
       R12R_RELEASE_FILE: ${{ github.event_name == 'schedule' && vars.R12R_ACTIVE_RELEASE_FILE_ID || inputs.release_file }}
@@ -224,3 +225,17 @@ jobs:
         run: >-
           gh workflow run "$R12R_WORKFLOW_INVOKE" --repo "$GITHUB_REPOSITORY"
           --ref "$R12R_BRANCH" -f mode=continue -f release_file="$R12R_RELEASE_FILE"
+
+  production-finished:
+    needs: [production]
+    if: needs.production.outputs.control_state == 'COMPLETE'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Stop the poller after the current campaign has completed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "$R12R_WORKFLOW_INVOKE" --repo "$GITHUB_REPOSITORY"

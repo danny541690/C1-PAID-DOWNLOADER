@@ -326,7 +326,12 @@ def coverage_snapshot(sealed, active):
         saved = exact.setdefault(key, {"file_id": row["file_id"], "proof": row["proof"], "params": params})
         require(saved["proof"]["raw_sha"] == row["proof"]["raw_sha"], "V26R_ARCHIVED_REQUEST_HASH_CONFLICT")
         spans[params["dataset"]][params.get("data_id", "")].append([params["start_date"], params["end_date"]])
-    return {"intervals": {d: {code: sorted(set(tuple(x) for x in ranges)) for code, ranges in ds.items()} for d, ds in spans.items()},
+    intervals = {
+        dataset: {code: [list(interval) for interval in sorted({tuple(value) for value in ranges})]
+                  for code, ranges in scopes.items()}
+        for dataset, scopes in spans.items()
+    }
+    return {"intervals": intervals,
             "exact": sorted(exact), "unique_verified_source_requests": len(exact),
             "sources": {key: {"file_id": row["file_id"], "raw_sha": row["proof"]["raw_sha"],
                               "packed_sha": row["proof"]["packed_sha"]} for key, row in exact.items()}}

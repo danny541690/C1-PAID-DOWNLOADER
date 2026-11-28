@@ -1,11 +1,12 @@
 """Production integration regressions for scope, atomicity, and safe scheduling."""
 
 from types import SimpleNamespace
+import json
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
 from scripts.r11_backer import autonomous_quota as quota, bulk_batch, production_download
-from scripts.r11_backer.full_release_evidence import INDEX_SHA, approval, legacy_item
+from scripts.r11_backer.full_release_evidence import INDEX_SHA, approval, coverage_snapshot, legacy_item
 from scripts.r11_backer.integration_pilot import digest, encode
 from scripts.r11_backer.production_full_history import CAMPAIGN, NAMESPACE, Runtime, initial_control
 from scripts.r11_backer.v25_account import FinMindTransport
@@ -54,6 +55,16 @@ class ReleaseTests(TestCase):
         self.assertEqual(item["completeness"]["keys"], [[day,"2388"] for day in dates])
         self.assertEqual(item["legacy_task_id"], "legacy")
         self.assertEqual(item["mode"], "ENTITY_RANGE")
+
+    def test_historical_coverage_survives_durable_json_readback(self):
+        params = {"dataset": "TaiwanStockPrice", "data_id": "2388", "start_date": "2026-01-02", "end_date": "2026-01-05"}
+        source = {"params": params, "file_id": "original", "proof": {"raw_sha": "raw", "packed_sha": "packed"}}
+        sealed = SimpleNamespace(read=lambda _: {})
+        with patch("scripts.r11_backer.full_release_evidence.checked_legacy_refs", return_value=[source, source]):
+            coverage = coverage_snapshot(sealed, {"tasks": []})
+        self.assertEqual(coverage, json.loads(encode(coverage)))
+        self.assertEqual(coverage["unique_verified_source_requests"], 1)
+        self.assertEqual(coverage["intervals"]["TaiwanStockPrice"]["2388"], [[params["start_date"], params["end_date"]]])
 
     def test_committing_b10_and_the_cursor_is_atomic_and_a_retry_does_not_count_again(self):
         initial = {"sequence": 51, "previous": None, "next_id": "52", "state":{"totals":{"VERIFIED":4749,"BLOCKED":51}}}
