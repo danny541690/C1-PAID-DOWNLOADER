@@ -26,8 +26,11 @@ on:
 permissions:
   contents: read
   actions: read
+defaults:
+  run:
+    shell: bash
 concurrency:
-  group: r12-1-bounded-preflight
+  group: ${{ github.event_name == 'schedule' && vars.R12R_ACTIVE_RELEASE_FILE_ID == '' && 'r12-v26r-idle-schedule' || 'r12-1-bounded-preflight' }}
   cancel-in-progress: false
 env:
   R12R_BRANCH: codex/r12-final-readiness-v2
