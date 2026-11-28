@@ -14,6 +14,7 @@ concurrency:
 env:
   R12_TASK_ID: R12-FINAL-READINESS-V2-01
   R12_SPEC_SHA: 1ebae4aa6c81edb3ac45ff65181065195ad3e2d99666f63f8588ae4dda2defa2
+  R12_V25_RESUME_FROM: '46097728002_1'
 jobs:
   LOCK:
     if: ${{ github.repository == 'danny541690/C1-PAID-DOWNLOADER' && contains(github.event.head_commit.message, '[r12-v25-preflight]') }}
@@ -111,7 +112,6 @@ jobs:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-          FINMIND_BACKER_TOKEN: ${{ secrets.FINMIND_BACKER_TOKEN }}
         run: python3 -m scripts.r11_backer.autonomous_closeout_v25 G05_B
   G03_FINAL:
     needs: [G03_OFFICIAL, G05_B]

@@ -34,6 +34,9 @@ PRIOR_COMMIT = "1781922334a8661915dbf6bcdf22610c0ea3fb6f"
 PRIOR_SHA = "e41fa62c29338898e54e01f37891611972f190f8e7e2c1c853c0ec54360b28f9"
 LEGACY_EVIDENCE = "d07dc296831e151607d18850d66df5a7c09adf8cd146b6c642b038ef3e2dc218"
 V20_REPORT = "049a250350455e819c3159731447f2f6e40548d94f664b69b9499fc9b0806611"
+RESUME_SOURCE = (46097728002, 1, "ae9c5719fba95f76c6e46089c7a99389225a9643",
+                 "827d6ad48403e8297962ba9f89dde21f64ecd84bcb97da2c9cc1212fb3ee5989")
+RESUMABLE = {"H", "G05_A", "G04_OFFLINE", "G05_B", "G07_STAGE", "G07"}
 PRESERVED = {"G00": "LOCK", "G01": "H", "G06": "G06", "G07": "G07", "G08": "G08"}
 ARTIFACTS = {"LOCK": ("INPUT_LOCK.json",), "H": ("HANDOVER_EVIDENCE.json", "V25_DECISION.json"),
              "G05_A": ("QUOTA_POLICY.json", "CONSUMER_INVENTORY.json", "QUOTA_MIGRATION.json"),
@@ -165,9 +168,46 @@ def units():
     return {"tests": result.testsRun, "failures": 0, "errors": 0, "verified_named_cases": True}
 
 
+def resume_gate(ctx, job):
+    run, attempt, commit, report_sha = RESUME_SOURCE
+    require(ctx.run > run and os.environ.get("R12_V25_RESUME_FROM") == f"{run}_{attempt}", "V25_RESUME_SOURCE_BINDING")
+    prior_root = private_path(ctx.access, ctx.task_root, f"{run}_{attempt}")
+    fid, raw_report = original(ctx.access, prior_root, "FINAL_READINESS.json")
+    require(digest(raw_report) == report_sha, "V25_RESUME_FINAL_READBACK")
+    prior = json.loads(raw_report)
+    require(prior["run_id"] == run and prior["spec_sha256"] == ctx.spec_sha and prior["commit"] == commit and
+            prior["attempt"] == attempt and prior["task_id"] == ctx.task_id, "V25_RESUME_FINAL_BINDING")
+    record = prior["workflow_job_evidence"][job]
+    actual = GitHub().json(f"/actions/jobs/{prior['github_jobs'][job]['id']}")
+    require(actual["run_id"] == run and actual["head_sha"] == commit and actual["conclusion"] == "success" and
+            record["status"] == "PASS" and set(ARTIFACTS[job]) <= record["outputs"].keys(), "V25_RESUME_PREVIOUS_GATE")
+    outputs = {}
+    for name, ref in record["outputs"].items():
+        file_id, response = original(ctx.access, prior_root, name)
+        require(file_id == ref["file_id"] and digest(response) == ref["sha256"], "V25_RESUME_PRIOR_OUTPUT")
+        outputs[name] = json.loads(response)
+    if job in {"G04_OFFLINE", "G05_A", "G05_B"}:
+        locked = ctx.read("INPUT_LOCK.json")
+        require(locked["production"] == prior["production_snapshot_after"] and not locked["active_writers"],
+                "V25_RESUME_LIVE_SNAPSHOT_CHANGED")
+    if job == "G05_B":
+        for probe in outputs["PROBE_RESULTS.json"]["rows"]:
+            if probe.get("file_id"):
+                v25_contracts.original_probe(ctx, probe)
+        ledger = v25_account.usage(ctx)
+        require(outputs["PROBE_LEDGER.json"] == ledger and not ledger["active_writer"], "V25_RESUME_B00_CHECKPOINT_CHANGED")
+        outputs["PROBE_RESULTS.json"] |= {"resumed_from_run": run, "new_live_http_this_run": 0}
+    outputs[f"RESUME_{job}.json"] = {"prior_run_id": run, "prior_attempt": attempt, "prior_commit": commit,
+         "prior_job_id": actual["id"], "prior_report_file_id": fid, "prior_report_sha256": report_sha,
+         "prior_output_refs": record["outputs"], "tested_code_scope_carried_forward": True}
+    return "PASS", outputs
+
+
 def execute(ctx, job):
     if job == "LOCK":
         return lock(ctx)
+    if job in RESUMABLE and os.environ.get("R12_V25_RESUME_FROM"):
+        return resume_gate(ctx, job)
     if job == "H":
         return handover(ctx)
     if job in {"G05_A", "G05_B"}:
@@ -266,11 +306,13 @@ def conclude(ctx):
         "hold_reasons": resources.get("blockers", [])}
     fid = ctx.write("FINAL_READINESS.json", payload)
     rows = [f"| {gate} | {result['status']} |" for gate, result in sorted(states.items())]
+    totals = reg.get("counts", {})
     text = ["# R12.1 V2.5 自主額度與全歷史清冊驗收", "", f"**{verdict['result']}**", "",
             f"{TASK_ID} · `{SPEC_SHA}`", "", f"Commit `{ctx.commit}`，Run `{ctx.run}`，Attempt `{ctx.attempt}`。", "",
             "| 關卡 | 結果 |", "|---|---|", *rows, "",
+            f"契約就緒 {totals.get('CONTRACT_READY', 0)}，依規則排除 {totals.get('EXCLUDED', 0)}，待核銷 {totals.get('HOLD', 0)}。",
             f"歷史分母 {data.get('full_history_denominator') or '待核證'}。有證據的規劃資料集 {data.get('planned_scope_datasets', '待核對')}。",
-            f"前置資料請求 {ledger.get('actual_data_requests', '待核對')} 次，帳號查詢 {ledger.get('actual_account_requests', '待核對')} 次。",
+            f"Task 累計資料請求 {ledger.get('actual_data_requests', '待核對')} 次，帳號查詢 {ledger.get('actual_account_requests', '待核對')} 次。",
             f"分區 `{partition['status']}`。正式放行 `HOLD`，正式派發 `0`。", ""]
     write_markdown(ctx, "FINAL_READINESS.md", "\n".join(text))
     report_id, raw = original(ctx.access, ctx.root, "FINAL_READINESS.json")

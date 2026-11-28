@@ -11,7 +11,8 @@ from scripts.r11_backer.integration_pilot import digest, encode
 from scripts.r11_backer.quota import HOUR_MS, REBALANCE_MS, available_slots, paced_slot
 from scripts.r11_backer.v24_regression import fixture, fetch_fixture
 from scripts.r11_backer.v25_account import FinMindTransport
-from scripts.r11_backer.v25_manifest import history_denominator, planned_request_identity, query_parameters
+from scripts.r11_backer.v25_contracts import TRADING_DATE, observed_contract
+from scripts.r11_backer.v25_manifest import build_partition, history_denominator, planned_request_identity, query_parameters
 
 
 class Journal:
@@ -196,3 +197,28 @@ class Cases(TestCase):
         reg = [{"dataset": "Yield", "state": "CONTRACT_READY"}]
         self.assertIsNone(history_denominator(reg, [long], ["unknown_broker_coverage"]))
         self.assertEqual(history_denominator(reg, [long | {"full_universe_verified": True, "complete_native_window_count": 2}], []), 2)
+
+    def test_archived_trading_dates_admit_snapshot_with_unique_dates(self):
+        row = {"dataset": TRADING_DATE}
+        evidence = {"evidence": {"anchor": "taiwanstocktradingdate"}, "parameters": row}
+        raw = b'{"status":200,"data":[{"date":"2002-01-03"},{"date":"1999-12-31"}]}'
+        rule, mode, dates, proof = observed_contract(row, evidence, raw)
+        self.assertEqual((mode, rule.key_fields, dates), ("SNAPSHOT", ("date",), ["1999-12-31", "2002-01-03"]))
+        self.assertFalse(proof["complete_market_history"])
+
+    def test_missing_official_start_keeps_observed_entity_as_bounded_scope(self):
+        name = "TaiwanStockWeekPrice"
+        sample = {"parameters": {"dataset": name, "data_id": "2330", "start_date": "2005-01-03", "end_date": "2005-01-10"},
+                  "observations": ["2005-01-03", "2005-01-10"]}
+        row = {"dataset": name, "grain": "weekly", "schema": {"identity_field": "stock_id"},
+               "source_dates_documented_from": [], "evidence": [], "completeness_methods": ["expected_keys"],
+               "mode_contracts": {"ENTITY_RANGE": {"required_parameters": ["dataset", "data_id", "start_date"]}}}
+        axes = {"source_witnesses": {name: [sample]}, "issuer_intervals": [
+                    {"id": "5555", "start": "1990-01-01", "end_exclusive": "2025-01-01"}],
+                "legacy_receipt_intervals": {}, "trading_dates": [], "existing_market_query_days": {}}
+        part, _ = build_partition(row, axes, {})
+        self.assertEqual(part["status"], "ARCHIVE_WITNESS_ONLY")
+        self.assertEqual(part["first_boundary_type"], "OBSERVED_SAMPLE_BOUND_ONLY")
+        self.assertIn("OFFICIAL_START_NOT_WITNESSED", part["unknown_boundaries"])
+        self.assertEqual(part["scheduled_requests"], 0)
+        self.assertIsNone(history_denominator([row | {"state": "CONTRACT_READY"}], [part], part["unknown_boundaries"]))

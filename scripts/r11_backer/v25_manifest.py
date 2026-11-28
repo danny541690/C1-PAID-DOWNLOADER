@@ -9,13 +9,11 @@ from .bulk_manifest import SCHEMA, MODES, read_manifest, request_id
 from .integration_pilot import digest, encode
 from .release_rehearsal import require
 from .tpex_closeout import LIFETIME_RUN
-from .v2_coverage import TPEx_HISTORICAL_RECONCILIATION, historical_packet, query_key
+from .v2_coverage import TPEx_HISTORICAL_RECONCILIATION, historical_packet, subtract_coverage
 from .v24_coverage import active_snapshot
 
-SNAPSHOT_LANES = {"TaiwanStockTradingDate": "B01", "TaiwanStockActiveETFInfo": "B08"}
 SOURCE_REVISION = "FinMind_v4_native_history_v25"
 M1_GRAINS = {"daily", "daily_observation"}
-BULK_CAP = 24 * 1024 * 1024
 
 
 def checked_rows(ctx, refs, key, count_field, read):
@@ -120,10 +118,14 @@ def query_parameters(partition, axes):
             if partition["source_interval"][0] <= day <= partition["source_interval"][1] and day not in excluded:
                 yield {"dataset": dataset, "start_date": day}
         return
+    known = {digest(encode(row["parameters"])) for row in axes.get("source_witnesses", {}).get(dataset, [])}
     if partition["selector"] == "OFFICIAL_ISSUER_VALIDITY":
         scopes = {(row["id"], max(first, date.fromisoformat(row["start"])),
                    min(last, date.fromisoformat(row["end_exclusive"]) - timedelta(days=1)))
                   for row in axes["issuer_intervals"]}
+    elif partition["selector"] == "OBSERVED_ENTITY_BOUNDS":
+        scopes = {(row["id"], date.fromisoformat(row["first"]), date.fromisoformat(row["last"]))
+                  for row in partition["observed_entity_bounds"]}
     else:
         scopes = {(key, first, last) for key in partition["observed_data_ids"]}
         if not scopes:
@@ -132,15 +134,11 @@ def query_parameters(partition, axes):
     for ident, begin, end in sorted(scopes):
         previous = accepted.get(ident or "", ())
         for lo, hi in years(begin, end):
-            if any(left <= hi and lo <= right for left, right in previous):
-                # Keep the existing original or choose an exact complement. Never overlap a verified individual request.
-                from .v2_coverage import subtract_coverage
-
-                remaining = subtract_coverage(lo, hi, previous)
-            else:
-                remaining = [[lo, hi]]
+            remaining = subtract_coverage(lo, hi, previous) if previous else [[lo, hi]]
             for start, finish in remaining:
-                yield {"dataset": dataset, "start_date": start, "end_date": finish, **({"data_id": ident} if ident else {})}
+                params = {"dataset": dataset, "start_date": start, "end_date": finish, **({"data_id": ident} if ident else {})}
+                if digest(encode(params)) not in known:
+                    yield params
 
 
 def build_partition(row, axes, archive_by_dataset):
@@ -160,9 +158,9 @@ def build_partition(row, axes, archive_by_dataset):
     source_start = sorted(set(row["source_dates_documented_from"]))
     if not observations:
         return None, [{"dataset": name, "reason": "NO_WITNESSED_LATEST_NATIVE_OBSERVATION"}]
-    if not source_start and not frozen_archive:
-        return None, [{"dataset": name, "reason": "OFFICIAL_START_NOT_WITNESSED", "latest_observed": observations[-1]}]
-    documented_start = source_start[0] if source_start else min(r["confirmed_from"] for r in frozen_archive)
+    sample_only = not source_start and not frozen_archive
+    documented_start = (source_start[0] if source_start else
+                        min(r["confirmed_from"] for r in frozen_archive) if frozen_archive else observations[0])
     latest = max([observations[-1], *(r["confirmed_through"] for r in frozen_archive)])
     if documented_start > latest:
         return None, [{"dataset": name, "reason": "DOCUMENTED_AND_WITNESSED_BOUNDS_CONFLICT"}]
@@ -170,10 +168,22 @@ def build_partition(row, axes, archive_by_dataset):
     data_ids = sorted({r["parameters"]["data_id"] for r in samples if r["parameters"].get("data_id")})
     if witnessed.get("parameters", {}).get("data_id"):
         data_ids = sorted(set(data_ids) | {witnessed["parameters"]["data_id"]})
+    bounds = defaultdict(set)
+    for sample in samples:
+        if ident := sample["parameters"].get("data_id"):
+            bounds[ident].update(sample["observations"])
+    if witnessed.get("parameters", {}).get("data_id"):
+        bounds[witnessed["parameters"]["data_id"]].update(witnessed.get("observed_dates", ()))
+    observed_entities = [{"id": ident, "first": min(days), "last": max(days)} for ident, days in sorted(bounds.items()) if days]
+    unknown = ["UNOBSERVED_LATER_PUBLICATIONS", "VERIFIED_FULL_NATIVE_HISTORY_UNIVERSE"]
+    if sample_only:
+        unknown.append("OFFICIAL_START_NOT_WITNESSED")
     base = {"dataset": name, "source_interval": [documented_start, latest], "grain": row["grain"],
-            "official_start_evidence": row["evidence"], "latest_is_observed_publication_bound": True,
+            "first_boundary_type": ("OBSERVED_SAMPLE_BOUND_ONLY" if sample_only else
+                                    "OFFICIAL_DOCUMENTED_START" if source_start else "CERTIFIED_ARCHIVE_BOUND_ONLY"),
+            "official_start_evidence": row["evidence"] if source_start else [], "latest_is_observed_publication_bound": True,
             "observed_data_ids": data_ids, "status": "PLANNED_REQUIRES_PER_WINDOW_SOURCE_COMPLETENESS",
-            "unknown_boundaries": ["UNOBSERVED_LATER_PUBLICATIONS", "VERIFIED_FULL_NATIVE_HISTORY_UNIVERSE"],
+            "unknown_boundaries": unknown,
             "logical_coverage_scope": "LISTED_OTC_RESEARCH" if name.startswith("TaiwanStock") else "AUTHORIZED_NATIVE_SOURCE",
             "source_replies_remain_complete": True, "contract_version": digest(encode(row["schema"])),
             "completeness_contract": row["completeness_methods"]}
@@ -183,7 +193,7 @@ def build_partition(row, axes, archive_by_dataset):
             continue
         need_id = "data_id" in row["mode_contracts"][mode]["required_parameters"]
         if mode == "MARKET_DAY":
-            if row["grain"] not in M1_GRAINS or not axes["trading_dates"]:
+            if row["grain"] not in M1_GRAINS or not axes["trading_dates"] or not name.startswith("TaiwanStock"):
                 continue
             selectors = base | {"mode": mode, "selector": "REFERENCE_TRADING_CALENDAR", "observed_data_ids": []}
             if documented_start < axes["trading_dates"][0]:
@@ -191,9 +201,18 @@ def build_partition(row, axes, archive_by_dataset):
         else:
             if need_id and not (data_ids or stock_universe and axes["issuer_intervals"]):
                 continue
-            selector = "OFFICIAL_ISSUER_VALIDITY" if need_id and stock_universe and axes["issuer_intervals"] else "BOUNDED_NATIVE_RANGE"
+            if need_id and sample_only:
+                if not observed_entities:
+                    continue
+                selector = "OBSERVED_ENTITY_BOUNDS"
+            elif need_id and stock_universe and axes["issuer_intervals"]:
+                selector = "OFFICIAL_ISSUER_VALIDITY"
+            else:
+                selector = "BOUNDED_NATIVE_RANGE"
             selectors = base | {"mode": mode, "selector": selector,
                                 "observed_data_ids": data_ids if need_id else []}
+            if selector == "OBSERVED_ENTITY_BOUNDS":
+                selectors["observed_entity_bounds"] = observed_entities
         # The selectors emit unique physical requests independent of the release coverage counters.
         count = sum(1 for _ in query_parameters(selectors, axes))
         if mode == "MARKET_DAY" and axes["legacy_receipt_intervals"].get(name):
@@ -205,13 +224,16 @@ def build_partition(row, axes, archive_by_dataset):
                 "source_interval": [documented_start, latest], "archive_references": frozen_archive,
                 "remaining_unknown": ["PUBLICATIONS_OUTSIDE_ARCHIVED_BOUNDARY"]}, []
     if not choices:
-        return None, [{"dataset": name, "reason": "NO_QUERY_MODE_SUPPORTED_BY_OBSERVED_NATIVE_GRAIN_AND_ENTITY"}]
+        return base | {"mode": next((mode for mode in MODES if mode in modes), None), "selector": "VERIFIED_SAMPLE_WITNESSES",
+                       "status": "ARCHIVE_WITNESS_ONLY", "scheduled_requests": 0, "saved_samples": samples,
+                       "unknown_boundaries": unknown + ["NO_UNCOVERED_SAFE_QUERY_WITH_EVIDENCED_NATIVE_BOUNDARY"]}, []
     # Compare only equivalent source axes. A known instrument or partial calendar isn't proof of equivalent market coverage.
     for candidate in choices:
-        candidate["source_query_axis"] = ("FULL_MARKET_DAILY" if candidate["mode"] == "MARKET_DAY" else
+        candidate["source_query_axis"] = ("FULL_MARKET_DAILY" if candidate["mode"] in {"MARKET_DAY", "MARKET_RANGE"} and row["grain"] in M1_GRAINS else
                                          "OFFICIAL_STOCK_EFFECTIVE_PERIODS" if candidate["selector"] == "OFFICIAL_ISSUER_VALIDITY" else
                                          "NATIVE_INTERVAL_WITH_EVIDENCED_IDENTITIES")
-    eligible = [p for p in choices if p["mode"] == "MARKET_DAY" and "PRE_CALENDAR_SESSIONS_MISSING" not in p["unknown_boundaries"]]
+    eligible = [p for p in choices if p["source_query_axis"] == "FULL_MARKET_DAILY" and
+                "PRE_CALENDAR_SESSIONS_MISSING" not in p["unknown_boundaries"]]
     selected = min(eligible or choices, key=lambda p: (p["scheduled_requests"], MODES.index(p["mode"])))
     if selected["mode"] == "MARKET_DAY" and selected.get("overlap_gate"):
         without_overlap = [p for p in choices if p["mode"] == "ENTITY_RANGE" and p["selector"] == "OFFICIAL_ISSUER_VALIDITY"]

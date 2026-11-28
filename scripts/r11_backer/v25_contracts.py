@@ -10,14 +10,29 @@ import re
 from zipfile import ZipFile
 
 from .bulk_manifest import adapt_rule
+from .drive_pilot import ensure
 from .final_readiness_v2 import original
+from .archive import compress_original
+from .final_source_probes import PREFIX as HISTORICAL_PREFIX
+from .finish_preflight import RUN_HISTORY
 from .integration_pilot import digest, encode, verify_private_folder
 from .release_probes import contracts, read_private_file
-from .release_rehearsal import require
+from .release_rehearsal import require, root_folder
+from .tpex_history import ARCHIVE, verified_archive_files
 from .v2_registry import NativeContract, read_rows
+from .v24_sources import DATE_BOUND, TOPIC, plain
 
 HIGH_FREQUENCY = {"TaiwanFutOptTickInfo", "TaiwanFuturesKBar", "TaiwanFuturesSpreadTick", "TaiwanStockKBar"}
 PRIOR_FOUR = {"TaiwanFuturesFinalSettlementPrice", "TaiwanStockParValueChange", "TaiwanStockActiveETFInfo", "TaiwanStockTradingDate"}
+TRADING_DATE = "TaiwanStockTradingDate"
+CALENDAR_PACKET = "18jaIuL_-a3QS-IQBL_xo2RYDeC6QKt93"
+CALENDAR_MEMBER = "backer/response-34.json"
+TECHNICAL_BOUNDS = {
+    "TaiwanStockMonthPrice": "k-taiwanstockmonthprice-backersponsor",
+    "TaiwanStockWeekPrice": "k-taiwanstockweekprice-backersponsor",
+    "TaiwanStockPER": "perpbr-taiwanstockper",
+    "TaiwanStockPriceLimit": "taiwanstockpricelimit-backersponsor",
+}
 PROBES = (
     ("TaiwanFuturesFinalSettlementPrice", "B08", 4, "Backer", {"data_id": "TX", "start_date": "2024-01-17", "end_date": "2024-01-17"}, "Derivative", "taiwanfuturesfinalsettlementprice-backersponsor"),
     ("TaiwanStockTradingDate", "B01", 3, "Free", {}, "Technical", "taiwanstocktradingdate"),
@@ -40,6 +55,28 @@ def official_inputs(ctx):
     return lock, bodies
 
 
+def technical_bound(row, raw, source):
+    """Read the official section by label, including anchors with Chinese title prefixes."""
+    dataset = row["dataset"]
+    if dataset not in TECHNICAL_BOUNDS:
+        return row
+    anchor = TECHNICAL_BOUNDS[dataset]
+    match = next((m for m in TOPIC.finditer(raw.decode()) if m[1] == anchor), None)
+    require(match is not None and dataset in plain(match[2]), "V25_TECHNICAL_SECTION_BINDING")
+    bound = DATE_BOUND.search(plain(match[3]))
+    require(bound is not None, "V25_TECHNICAL_DOCUMENTED_BOUND")
+    first = str(date.fromisoformat(bound[1]))
+    assert first == bound[1]
+    result = row | {"source_dates_documented_from": sorted(set(row["source_dates_documented_from"]) | {first}),
+                    "evidence": row["evidence"] + [source | {"anchor": anchor, "documented_from": first}]}
+    if dataset == "TaiwanStockPriceLimit":
+        require("每日漲跌停價" in plain(match[2]) and "MARKET_DAY" in row["mode_contracts"] and any(
+            item.get("market_day_tier") == "Backer" for item in row["source_rules"]), "V25_PRICE_LIMIT_DAILY_MODE")
+        result |= {"grain": "daily", "schema": row["schema"] | {"grain": "daily"},
+                   "mode_contracts": {"MARKET_DAY": row["mode_contracts"]["MARKET_DAY"] | {"grain": "daily"}}}
+    return result
+
+
 def offline(ctx):
     baseline = ctx.prior("DATASET_REGISTRY.json")
     require(baseline["counts"] == {"CONTRACT_READY": 66, "EXCLUDED": 19, "HOLD": 18}, "V25_CONTRACT_BASELINE")
@@ -50,7 +87,8 @@ def offline(ctx):
     for row in baseline["rows"]:
         dataset = row["dataset"]
         if row["state"] == "CONTRACT_READY":
-            rows.append(row | {"v25": "INHERITED_CONTRACT_READY"})
+            rows.append(technical_bound(row, records["Technical"], lock["sources"]["Technical"]) |
+                        {"v25": "INHERITED_CONTRACT_READY"})
             ready.add(dataset)
             continue
         if row["state"] == "EXCLUDED":
@@ -103,11 +141,34 @@ def calendar_days(raw):
     return sorted(dates)
 
 
+def archived_calendar(ctx, decision):
+    """Pin the exact prior source body and hashes without repeating its snapshot request."""
+    legacy = ctx.legacy("CONTRACT_EVIDENCE.json")
+    parameters = {"dataset": TRADING_DATE}
+    entry, = [item for item in legacy["stored_samples"] if item["run"] == RUN_HISTORY and
+              item.get("request") == parameters and item["result"] == "VALID_SAMPLE"]
+    folder = root_folder(ctx.access, prefix=f"{HISTORICAL_PREFIX}_B", run_id=RUN_HISTORY, attempt=1, create=False)
+    fid = ensure(folder, ARCHIVE, "application/zip", ctx.access, create=False)
+    require(fid == CALENDAR_PACKET, "V25_CALENDAR_ARCHIVE_IDENTITY")
+    packet = verified_archive_files(ctx.access, folder)
+    report = json.loads(packet["reconciliation.json"])
+    match, = [item for item in report["backer_requests"] if item["request"] == parameters]
+    require(match["status"] == "VALID_SAMPLE" and match["original"] == CALENDAR_MEMBER, "V25_CALENDAR_ARCHIVE_MEMBER")
+    raw = packet[CALENDAR_MEMBER]
+    packed, raw_sha, packed_sha = compress_original(raw)
+    require(raw_sha == entry["raw_sha256"] and packed_sha == entry["gzip_sha256"] and
+            len(calendar_days(raw)) == entry["rows"], "V25_CALENDAR_ARCHIVED_ROWS_AND_DUAL_SHA")
+    return raw, {"raw_sha256": raw_sha, "gzip_sha256": packed_sha, "file_id": fid, "filename": ARCHIVE,
+                 "archive_member": CALENDAR_MEMBER, "packed_bytes": len(packed), "raw_bytes": len(raw),
+                 "source_run": RUN_HISTORY, "source_attempt": 1, "parameters": parameters,
+                 "capture_time_known": False, "evidence": decision["evidence"], "status": "ARCHIVED_ORIGINAL_REUSED"}
+
+
 def observed_contract(row, record, raw):
     dataset = row["dataset"]
     doc = record["evidence"]
     params = record["parameters"]
-    if dataset == "TaiwanStockTradingDate":
+    if dataset == TRADING_DATE:
         days = calendar_days(raw)
         rule = NativeContract(dataset, "snapshot", "snapshot", ("date",), ("date",), date_field=None,
                               required_parameters=("dataset",), allowed_parameters=("dataset",))
@@ -145,6 +206,7 @@ def final(ctx):
         # The official decisions remain valid if the independent live witness stage is unavailable.
         result = {"rows": []}
     direct = {row["dataset"]: row for row in result["rows"] if row.get("file_id") and row["status"] == "HTTP_RESPONSE_VERIFIED"}
+    calendar = next(item for item in ctx.read("PROBE_PLAN.json")["selected"] if item["parameters"]["dataset"] == TRADING_DATE)
     output, gaps = [], []
     for row in work["rows"]:
         dataset = row["dataset"]
@@ -152,18 +214,24 @@ def final(ctx):
             output.append(row)
             continue
         candidate = direct.get(dataset)
-        if not candidate:
+        if not candidate and dataset != TRADING_DATE:
             gaps.append({"dataset": dataset, "reason": "NO_NEW_SUCCESSFUL_AUTHORIZED_NATIVE_ORIGINAL"})
             output.append(row)
             continue
         try:
-            rule, mode, days, proof = observed_contract(row, candidate, original_probe(ctx, candidate))
+            if candidate:
+                raw = original_probe(ctx, candidate)
+                witness = {key: candidate[key] for key in ("raw_sha256", "gzip_sha256", "file_id", "filename", "parameters",
+                                                          "captured_at", "raw_bytes", "packed_bytes")}
+            else:
+                raw, candidate = archived_calendar(ctx, calendar)
+                witness = candidate
+            rule, mode, days, proof = observed_contract(row, candidate, raw)
         except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
             label = str(error) if re.fullmatch(r"[A-Z0-9_]{3,90}", str(error)) else type(error).__name__
-            gaps.append({"dataset": dataset, "reason": label, "file_id": candidate["file_id"]})
+            gaps.append({"dataset": dataset, "reason": label, "file_id": (candidate or {}).get("file_id")})
             output.append(row | {"v25": "HOLD_WITH_REASON", "v25_witness_failure": label})
             continue
-        witness = {key: candidate[key] for key in ("raw_sha256", "gzip_sha256", "file_id", "filename", "parameters", "captured_at", "raw_bytes", "packed_bytes")}
         output.append(row | {"state": "CONTRACT_READY", "v25": "CONTRACT_READY_WITH_ORIGINAL",
                               "mode_contracts": {mode: asdict(rule)}, "schema": asdict(rule), "grain": rule.grain,
                               "contract_blockers": [], "v25_witness": witness | {"observed_dates": days, "proof": proof},
