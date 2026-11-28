@@ -11,6 +11,7 @@ from .cross_run_ledger import DriveJournal
 from .drive_pilot import FOLDER, ensure, find
 from .integration_pilot import digest, encode, verify_private_folder
 from .live_recovery_canary import month_folder, read_json_file, write_json
+from .final_readiness_v2 import private_path
 from .release_probes import Task
 from .release_rehearsal import require
 from .v2_registry import NativeContract
@@ -128,11 +129,12 @@ def private_child(parent, name, access, *, create):
     return folder
 
 
-def sandbox(ctx, create, *, case=CASE):
+def sandbox(ctx, create, *, case=CASE, run_root=None):
     require("FINMIND_BACKER_TOKEN" not in os.environ, "V24_REGRESSION_SECRET_SCOPE")
-    root = metadata(ctx.root, ctx.access)
+    target = run_root or ctx.root
+    root = metadata(target, ctx.access)
     require(root and root["parents"] == [ctx.task_root] and root["shared"] is False, "V24_REGRESSION_ROOT")
-    prepare = private_child(ctx.root, case, ctx.access, create=create)
+    prepare = private_child(target, case, ctx.access, create=create)
     stage = private_child(prepare, "STAGING", ctx.access, create=create)
     bronze = private_child(prepare, "TEST_BRONZE", ctx.access, create=create)
     return prepare, stage, path(bronze)
@@ -195,10 +197,17 @@ def stage(ctx):
 
 
 def resume(ctx):
-    prepare, _, destination = sandbox(ctx, False)
+    checkpoint = ctx.read("G07_CHECKPOINT.json")
+    origin = checkpoint["origin_run"]
+    same_run = origin == ctx.run and checkpoint["origin_attempt"] == ctx.attempt
+    target = None
+    if not same_run:
+        inherited = ctx.read("RESUME_G07_STAGE.json")
+        target = private_path(ctx.access, ctx.task_root, f"{origin}_{checkpoint['origin_attempt']}")
+        require(target == inherited["prior_run_folder"] and inherited["prior_run_id"] == origin, "V24_CROSS_RUN_STAGE_PATH")
+    prepare, _, destination = sandbox(ctx, False, run_root=target)
     journal = DriveJournal(prepare, ctx.access)
     manifest = read_json_file(prepare, MANIFEST, ctx.access)
-    checkpoint = ctx.read("G07_CHECKPOINT.json")
     initial = journal.version(checkpoint["journal_sequence"])
     require(initial and digest(encode(initial)) == checkpoint["journal_sha256"] and
             digest(encode(manifest)) == checkpoint["manifest_sha256"] and
@@ -225,7 +234,8 @@ def resume(ctx):
     return "PASS", {"INTEGRATION_REPORT.json": {"isolated_manifest_sha256": checkpoint["manifest_sha256"],
                      "stage_job": checkpoint["origin_job"], "resume_job": os.environ["GITHUB_JOB"],
                      "run_id": ctx.run, "attempt": ctx.attempt, "cross_job_same_native_checkpoint": True,
-                     "durable_store_prior_cross_run": prior, "same_native_run_waiting_between_jobs": True,
+                     "durable_store_prior_cross_run": prior, "cross_run_native_checkpoint_reused": not same_run,
+                     "native_origin_run_id": origin,
                      "unacknowledged_stage_reused": checkpoint["market_stage_id"], "provider_requests_on_resume": 0,
                      "stale_writer_rejected": True, "duplicate_receipt_replay_unchanged": True, "test_states": result,
                      "production_mutations": 0, "actual_finmind_requests": 0, "terminal_sequence": accepted["sequence"]}}

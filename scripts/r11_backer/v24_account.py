@@ -1,7 +1,7 @@
 """Reopen the account broker checkpoint and admit only bounded, evidenced requests."""
 
 from collections import Counter
-from datetime import date
+from datetime import date, datetime
 from http.client import IncompleteRead
 import json
 import os
@@ -11,11 +11,11 @@ import subprocess
 from time import sleep, time
 from urllib.error import HTTPError
 from zoneinfo import ZoneInfo
-from datetime import datetime
 
 from . import v21_broker as broker, v2_resources
 from .archive import compress_original
 from .cross_run_ledger import DriveJournal
+from .drive_retry import transient as retryable_network
 from .final_readiness_v2 import original, private_path
 from .integration_pilot import digest, encode
 from .live_bronze_admission import fetch_native_payload
@@ -27,7 +27,6 @@ from .v2_registry import certify_shape, NativeContract
 CONSUMER = "secrets.FINMIND_BACKER_TOKEN"
 WORKFLOW = "r12-v24-official-bulk.yml"
 GROUP = "r12-1-bounded-preflight"
-PROBE_PLAN_LIMIT = 2
 MINIMUM = ["SAME_BACKER_ACCOUNT_PLAN_AND_EXPIRY", "ACCOUNT_WIDE_CONSUMER_CONTROL_AND_RECENT_USAGE_EVIDENCE"]
 
 
@@ -256,6 +255,47 @@ class SharedPermit:
         return broker.commit_result(self.journal, head, identity, result, code=code, retry_after=retry_after)
 
 
+def shape_sample(ctx, permit, auth, rule, mode, params):
+    attempts = []
+    for number in range(4):
+        identity = digest(encode([ctx.task_id, ctx.spec_sha, "INCREMENTAL_SHAPE_PROBE", params, number]))
+        granted = permit(identity, params, None)
+        evidence = {"dataset": rule.dataset, "mode": mode, "params": params, "status": granted,
+                    "request_id": identity, "attempt": number + 1, "window_verified": False}
+        attempts.append(evidence)
+        if granted != "RESERVED":
+            break
+        code, delay, again, received = None, None, False, False
+        try:
+            raw, encoding = fetch_native_payload(auth, params, rule.byte_limit)
+            received = True
+            payload = json.loads(raw)
+            code = provider_block_code(payload.get("status")) if isinstance(payload, dict) else None
+            delay = payload.get("retry_after") if isinstance(payload, dict) else None
+            if code:
+                evidence["status"] = f"HTTP_{code}"
+            else:
+                packed, raw_sha, packed_sha = compress_original(raw)
+                evidence |= {"status": "ARCHIVED_SAMPLE", "raw_sha256": raw_sha, "packed_sha256": packed_sha,
+                             "content_encoding": encoding, "file_id": ctx.binary(
+                                 f"PROBE_{identity}.json.gz", packed, "application/gzip")}
+                evidence["native_shape"] = certify_shape(rule, params, raw)
+        except HTTPError as error:
+            code = error.code
+            delay = error.headers.get("Retry-After") if error.headers else None
+            evidence["status"] = f"HTTP_{code}"
+            again = code == 408 or 500 <= code < 600
+        except (OSError, RuntimeError, ValueError, IncompleteRead, EOFError) as error:
+            evidence["status"] = type(error).__name__
+            # Once the payload has arrived, an archive failure is not a source retry.
+            again = retryable_network(error) and not received
+        saved = permit.complete(identity, evidence["status"], code=code, retry_after=delay)
+        if not again or number == 3 or saved.get("status") == "HOLD_PROBE_RESULT_WRITE_UNCERTAIN":
+            break
+        sleep(2 ** number)
+    return attempts
+
+
 def samples_phase(ctx):
     lease = ctx.read("LEASE_EVIDENCE.json")
     account = ctx.read("ACCOUNT_BOOTSTRAP_RECEIPT.json")
@@ -278,39 +318,12 @@ def samples_phase(ctx):
                       ("TaiwanStockActiveETFInfo", "SNAPSHOT", {})]
         auth = os.environ.get("FINMIND_BACKER_TOKEN")
         require(auth, "PROBE_CREDENTIAL_UNAVAILABLE")
-        for dataset, mode, extra in authorized[:PROBE_PLAN_LIMIT]:
+        for dataset, mode, extra in authorized:
             contract = rules.get(dataset, {}).get("mode_contracts", {}).get(mode)
             params = {"dataset": dataset, **extra}
             if not contract or any(entry.get("request") == params for entry in previous):
                 continue
-            identity = digest(encode([ctx.task_id, ctx.spec_sha, "INCREMENTAL_SHAPE_PROBE", params]))
-            granted = permit(identity, params, None)
-            evidence = {"dataset": dataset, "mode": mode, "params": params, "status": granted,
-                        "request_id": identity, "window_verified": False}
-            if granted == "RESERVED":
-                code, delay = None, None
-                try:
-                    rule = NativeContract(**contract)
-                    raw, encoding = fetch_native_payload(auth, params, rule.byte_limit)
-                    payload = json.loads(raw)
-                    code = provider_block_code(payload.get("status")) if isinstance(payload, dict) else None
-                    delay = payload.get("retry_after") if isinstance(payload, dict) else None
-                    if code:
-                        evidence["status"] = f"HTTP_{code}"
-                    else:
-                        packed, raw_sha, packed_sha = compress_original(raw)
-                        evidence |= {"status": "ARCHIVED_SAMPLE", "raw_sha256": raw_sha, "packed_sha256": packed_sha,
-                                     "content_encoding": encoding, "file_id": ctx.binary(
-                                         f"PROBE_{identity}.json.gz", packed, "application/gzip")}
-                        evidence["native_shape"] = certify_shape(rule, params, raw)
-                except HTTPError as error:
-                    code = error.code
-                    delay = error.headers.get("Retry-After") if error.headers else None
-                    evidence["status"] = f"HTTP_{code}"
-                except (OSError, RuntimeError, ValueError, IncompleteRead) as error:
-                    evidence["status"] = type(error).__name__
-                permit.complete(identity, evidence["status"], code=code, retry_after=delay)
-            probes.append(evidence)
+            probes.extend(shape_sample(ctx, permit, auth, NativeContract(**contract), mode, params))
     return ("HOLD" if blockers else "PASS"), {"PROBE_RESULTS.json": {"probes": probes, "blockers": blockers,
                                                                         "readiness_only": True},
                                                "PROBE_LEDGER.json": usage(ctx)}

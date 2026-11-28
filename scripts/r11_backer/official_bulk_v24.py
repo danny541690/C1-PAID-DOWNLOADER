@@ -8,6 +8,7 @@ from io import StringIO
 import json
 import os
 import re
+import subprocess
 import sys
 import unittest
 
@@ -30,6 +31,7 @@ PRIOR_COMMIT = "b502683fc5fd9806c7277f1d7c6701821ab7adc7"
 PRIOR_SPEC = "c83f8916d9559cba7638193bd5e206498f085ba8648337a685aeb2a5548b4271"
 PRIOR_REPORT_SHA = "13e4ecafee084c865136dc5b873254d923a6e4b0c1334ec74d304a19b6e7555c"
 LEGACY_RUN = 46030259242
+LEGACY_COMMIT = "4df007ddbe6c3f25eddd6ed7f3ac1599a2ced25c"
 LEGACY_REPORT_SHA = "049a250350455e819c3159731447f2f6e40548d94f664b69b9499fc9b0806611"
 REUSED = ("G00", "G01", "G02", "G06", "G07", "G08")
 PROBE_JOBS = {"G05_A", "G05_B"}
@@ -128,7 +130,7 @@ def lock(ctx):
             previous["run_id"] == PRIOR_RUN and previous["task_id"] == TASK_ID and previous["attempt"] == 1,
             "V24_PREVIOUS_RUN_BINDING")
     prior_jobs = {job["name"]: job for job in github.pages(f"/actions/runs/{PRIOR_RUN}/attempts/1/jobs", "jobs")}
-    mapped = {"G00": "LOCK", "G01": "H", **{gate: gate for gate in REUSED[2:]}}
+    mapped = {"G00": "LOCK", "G01": "H", "G06": "G06", "G07": "G07", "G08": "G08"}
     inherited = {}
     for gate, job in mapped.items():
         actual = prior_jobs.get(job, {})
@@ -138,6 +140,18 @@ def lock(ctx):
         inherited[gate] = {"status": "PASS", "run_id": PRIOR_RUN, "attempt": 1, "job_id": actual["id"],
                            "commit": PRIOR_COMMIT, "spec_sha256": PRIOR_SPEC,
                            "sha256": digest(encode(previous["gates"][gate]))}
+    # V2.1 inherited G02 from V2.0 rather than running a second G02 job.
+    recovery_proof = previous["gates"]["G02"]
+    parent = recovery_proof["inherited_from"]
+    legacy = ctx.legacy("FINAL_READINESS.json")
+    recovery_job = next(job for job in github.pages(f"/actions/runs/{LEGACY_RUN}/attempts/1/jobs", "jobs")
+                        if job["name"] == "G02")
+    require(recovery_proof["status"] == legacy["gates"]["G02"]["status"] == "PASS" and
+            parent["run_id"] == LEGACY_RUN and parent["spec_sha256"] == LEGACY_SHA and
+            parent["commit"] == LEGACY_COMMIT and recovery_job["id"] == parent["job_id"] and
+            recovery_job["conclusion"] == "success" and
+            digest(encode(legacy["gates"]["G02"])) == parent["report_sha256"], "V24_INHERITED_G02_CHAIN")
+    inherited["G02"] = {"status": "PASS", **parent, "via_run": PRIOR_RUN}
     before = snapshot(ctx)
     stable = before == previous["production_snapshot_after"]
     last_formal, active = production_runs(github)
@@ -165,9 +179,9 @@ def handover(ctx):
 def contract_final(ctx):
     registry = ctx.read("OFFICIAL_DATASET_REVIEW.json")
     modes = ctx.read("OFFICIAL_QUERY_REVIEW.json")
-    results = ctx.read("PROBE_RESULTS.json")
+    results = optional(ctx, "PROBE_RESULTS.json")
     sources = ctx.read("OFFICIAL_SOURCE_LOCK.json")
-    by_dataset = {probe["dataset"]: probe for probe in results["probes"]}
+    by_dataset = {probe["dataset"]: probe for probe in results.get("probes", ())}
     for row in registry["rows"]:
         if row["dataset"] in by_dataset:
             row["probe_evidence"] = by_dataset[row["dataset"]]
@@ -195,6 +209,51 @@ def units():
     return {"test_count": sum(report["tests_run"] for report in checks.values()), "suites": checks}
 
 
+def resume_job(ctx, job):
+    if job not in {"G03_OFFICIAL", "G07_STAGE"}:
+        return None
+    source = re.fullmatch(r"(\d+)_(1|2|3|4)_([0-9a-f]{40})", os.environ.get("R12_V24_RESUME_FROM", ""))
+    if source is None or not int(source[1]) < ctx.run:
+        return None
+    run, attempt, commit = int(source[1]), int(source[2]), source[3]
+    prefix = "scripts/r11_backer/"
+    relevant = ("v24_sources.py", "release_probes.py", "reconcile_catalog.py", "v2_registry.py") if job == "G03_OFFICIAL" else (
+        "bulk_batch.py", "bulk_manifest.py", "production_download.py", "release_batch.py", "live_bronze_admission.py",
+    )
+    try:
+        require(subprocess.run(["git", "diff", "--quiet", commit, ctx.commit, "--",
+                                *(prefix + name for name in relevant)], check=False).returncode == 0, "V24_RESUMED_CODE_UNCHANGED")
+        root = private_path(ctx.access, ctx.task_root, f"{run}_{attempt}")
+        record = read_json_file(root, f"{job}.json", ctx.access)
+        actual = next(row for row in GitHub().pages(f"/actions/runs/{run}/attempts/{attempt}/jobs", "jobs") if row["name"] == job)
+        binding = ctx.binding() | {"run_id": run, "attempt": attempt, "commit": commit, "job": job, "status": "PASS"}
+        require(all(record.get(key) == value for key, value in binding.items()) and actual["conclusion"] == "success" and
+                actual["head_sha"] == commit and set(JOB_ARTIFACTS[job]) <= record["outputs"].keys(), "V24_RESUME_JOB_BINDING")
+        output = {}
+        for name, ref in record["outputs"].items():
+            fid, original_bytes = original(ctx.access, root, name)
+            require(fid == ref["file_id"] and digest(original_bytes) == ref["sha256"], "V24_RESUME_OUTPUT_DIGEST")
+            output[name] = json.loads(original_bytes)
+        if job == "G03_OFFICIAL":
+            saved = output["OFFICIAL_SOURCE_LOCK.json"]["originals"]
+            fid, raw = original(ctx.access, root, "OFFICIAL_SOURCE_ORIGINALS.zip")
+            require(fid == saved["file_id"] and digest(raw) == saved["sha256"], "V24_RESUMED_OFFICIAL_ARCHIVE")
+        else:
+            checkpoint = output["G07_CHECKPOINT.json"]
+            index, _, _ = v24_regression.fixture()
+            require(checkpoint["origin_run"] == run and checkpoint["origin_attempt"] == attempt and
+                    checkpoint["test_only"], "V24_NATIVE_FIXTURE_STAGE_BINDING")
+            sandbox_root, _, _ = v24_regression.sandbox(ctx, False, run_root=root)
+            fixture_manifest = read_json_file(sandbox_root, v24_regression.MANIFEST, ctx.access)
+            require(fixture_manifest["index_sha256"] == digest(encode(index)), "V24_NATIVE_FIXTURE_CHANGED")
+        output["RESUME_" + job + ".json"] = {"prior_run_id": run, "prior_attempt": attempt, "prior_commit": commit,
+                                              "prior_job_id": actual["id"], "prior_run_folder": root,
+                                              "verified_output_sha256": record["outputs"]}
+        return "PASS", output
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError, StopIteration, subprocess.SubprocessError):
+        return None
+
+
 def stage_action(ctx, job):
     if job == "LOCK":
         return lock(ctx)
@@ -204,6 +263,8 @@ def stage_action(ctx, job):
         return contract_final(ctx)
     if job == "G06":
         return v24_regression.engine(ctx, units())
+    if resumed := resume_job(ctx, job):
+        return resumed
     if job in PROBE_JOBS:
         require(ctx.read("LOCK.json")["status"] == "PASS", "V24_PROBE_INPUT_LOCK_HOLD")
     return ACTIONS[job](ctx)
@@ -223,6 +284,8 @@ def store_job(ctx, job):
         status = "FAIL"
         failure = {"category": type(exc).__name__,
                    **({"code": str(exc)} if re.fullmatch(r"[A-Z][A-Z0-9_]{2,99}", str(exc)) else {})}
+        if isinstance(exc, KeyError) and exc.args and isinstance(exc.args[0], str) and re.fullmatch(r"[a-zA-Z_0-9]{1,45}", exc.args[0]):
+            failure["missing_field"] = exc.args[0]
     evidence = ctx.binding() | {"job": job, "status": status, "outputs": output, "error": failure}
     ctx.write(f"{job}.json", evidence)
     print(f"{job} {status}" + (f" {failure}" if failure else ""))
