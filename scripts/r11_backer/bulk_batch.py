@@ -188,6 +188,8 @@ def receive_one(manifest, record, journal, item, access, run, permit, fetch, now
             grant_status = str(error)
             if grant_status == "B00_ATTEMPT_ALREADY_CHARGED":
                 return update(journal, record, key, task | {"status": "REPAIR", "reason": "UNKNOWN_CHARGED_ATTEMPT"})
+            if grant_status == "B00_PROVIDER_AUTHORIZATION_HOLD":
+                return update(journal, record, key, task | {"status": "BLOCKED", "reason": grant_status})
             skipped = {k: v for k, v in task.items() if k != "pending"}
             return update(journal, record, key, skipped | {"status": "READY", "attempts": attempt - 1,
                                                            "retry_after": max(now + 1, (error.due or 0) // 1000),
@@ -269,7 +271,20 @@ def dispatch(manifest, record, journal, access, run, *, permit, fetch, request_c
         if not status["can_admit"]:
             return record
     sent = sum(event["kind"] == "download" and event["run"] == run for event in record["state"]["events"])
-    for item in manifest["items"]:
+    items = manifest["items"]
+    broker = transport.broker if manifest.get("campaign") and transport is not None else None
+    if broker:
+        from .quota import REBALANCE_MS
+
+        def rebalance_inputs():
+            tasks = record["state"]["tasks"]
+            lanes = Counter(item["lane"] for item in items if tasks[item["task_id"]]["status"] == "READY")
+            return {lane: {"count": count, "priority": 2 if lane == "B09" else 1,
+                           "wait_ms": 0, "recent_completed": 0} for lane, count in lanes.items()}
+
+        plan = broker.plan(rebalance_inputs())
+        items = sorted(items, key=lambda item: (-plan["lane_allocations"].get(item["lane"], 0), item["lane"]))
+    for item in items:
         for _ in range(item["max_pages"]):
             now = int(time())
             state = record["state"]
@@ -278,6 +293,8 @@ def dispatch(manifest, record, journal, access, run, *, permit, fetch, request_c
             task = state["tasks"][item["task_id"]]
             if task["status"] != "READY" or task.get("retry_after", 0) > now:
                 break
+            if broker and broker.clock() - plan["as_of_ms"] >= REBALANCE_MS:
+                plan = broker.plan(rebalance_inputs())
             if capacity:
                 status = capacity.check(flight_bytes(manifest, record, native=True),
                                         2 * packed_limit(item) * item["max_pages"], reserve=True)
@@ -348,6 +365,8 @@ def accept(manifest, record, journal, access, *, destination, audit=False, rerea
             continue
         if item["completeness"].get("planned_class") == "EXPLORATION":
             tasks[key] = task | {"status": "EXPLORATION_CAPTURED", "reason": "V26_EXPLORATION_STAGE_ONLY"}
+            continue
+        if task.get("comparison", {}).get("state") in {"WAIT", "WAIT_CAPACITY"} and status == "STAGED":
             continue
         with operation_scope("B10", key):
             try:

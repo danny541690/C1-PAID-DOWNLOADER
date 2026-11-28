@@ -404,71 +404,29 @@ def accept_segment(folder, manifest, journal, record, master_journal, master, ac
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("launch", "continue", "accept", "validate-native", "validate-autonomous-quota",
-                                          "validate-executable-manifest"))
-    phase = parser.parse_args().phase
-    if phase == "validate-native":
-        from .official_bulk_v24 import run_job
+    parser.add_argument("phase", choices=("admission", "launch", "continue", "accept", "next", "resume",
+                                          "validate-native", "validate-autonomous-quota", "validate-executable-manifest"))
+    parser.add_argument("--profile", default="production", choices=("production", "integration"))
+    parser.add_argument("--release-file")
+    parser.add_argument("--integration-origin", type=int)
+    parser.add_argument("--interrupt-after-stage", action="store_true")
+    args = parser.parse_args()
+    validation = {"validate-native": ".official_bulk_v24", "validate-autonomous-quota": ".autonomous_closeout_v25",
+                  "validate-executable-manifest": ".executable_closeout_v26"}
+    if args.phase in validation:
+        from importlib import import_module
 
-        run_job("G06")
-        return
-    if phase == "validate-autonomous-quota":
-        from .autonomous_closeout_v25 import run_job
-
-        run_job("G06")
-        return
-    if phase == "validate-executable-manifest":
-        from .executable_closeout_v26 import run_job
-
-        run_job("G06")
+        import_module(validation[args.phase], __package__).run_job("G06")
         return
     try:
-        run = int(os.environ["GITHUB_RUN_ID"])
-        access = token()
-        parent, root = management(access, create=phase == "launch")
-        journal = DriveJournal(root, access)
-        master = journal.head()
-        if phase == "launch" and master is None:
-            freeze(access, parent, root, journal, run)
-            master = journal.head()
-        plan = read_json_file(root, PLAN, access)
-        require(master and master["state"]["plan_sha"] == digest(encode(plan)) and
-                plan["plan_version"] == PLAN_VERSION and plan["campaign"] == CAMPAIGN, "CAMPAIGN_MANIFEST_DIGEST")
-        master, supplement = checked_otc_plan(plan, master, journal, root, access, create=phase != "accept")
-        state, result = master["state"], {}
-        group = pending_group(plan, supplement, state)
-        if group is not None and not state.get("auth_hold"):
-            active_plan = plan if group == "BASE" else supplement
-            folder, manifest, batch, record = segment(active_plan, master, root, access, group, create=phase != "accept")
-            if phase == "accept":
-                master, state, result = accept_segment(folder, manifest, batch, record, journal, master, access, run, group)
-            else:
-                state = record["state"]
-                if not state.get("auth_hold") and any(t["status"] in {"READY", "REQUESTING"} for t in state["tasks"].values()):
-                    from .v25_account import production_transport
-                    from .v26_capacity import CapacityGuard, observed_drive
+        from .production_full_history import run_cli
 
-                    with production_transport(access, run, int(os.environ["GITHUB_RUN_ATTEMPT"])) as transport:
-                        record = release_batch.dispatch(manifest, record, batch, access, run, request_ceiling=BATCH_SIZE,
-                                                        workers=WORKERS, lane_limit=WORKERS, transport=transport,
-                                                        capacity=CapacityGuard(lambda: observed_drive(access)))
-                state = record["state"]
-                result = release_batch.report(manifest, record, run)
-        totals = master["state"]
-        resume = pending_group(plan, supplement, totals) is not None and not state.get("auth_hold")
-        if phase == "accept" and (path := os.environ.get("GITHUB_OUTPUT")):
-            with open(path, "a", encoding="utf-8") as output:
-                print(f"resume={'true' if resume else 'false'}", file=output)
-        print(json.dumps(result | {"campaign": CAMPAIGN, "budget": year_budget(plan, supplement),
-                                   "finished_windows": totals["cursor"] + totals.get("otc_cursor", 0), "batch_group": group,
-                                   "tpex_new_windows": supplement["budget"]["windows"] if supplement else 0,
-                                   "total_states": totals["totals"], "total_rows": totals["rows"],
-                                   "total_source_requests": totals["source_requests"],
-                                   "reused_receipts": len(plan["reused"]), "automatic_resume": resume,
-                                   "scope": "2026_CERTIFIED_STOCK_WINDOWS", "cutoff": str(CUTOFF)}, sort_keys=True))
+        run_cli(args)
     except Exception as error:
-        label = str(error) if isinstance(error, RehearsalError) else type(error).__name__
-        print(f"R12_PRODUCTION_HOLD phase={phase} label={label}")
+        from .executable_closeout_v26 import label
+
+        evidence = label(error)
+        print(json.dumps({"state": "HOLD", "phase": args.phase, "error": evidence}, sort_keys=True))
         raise SystemExit(1) from None
 
 
